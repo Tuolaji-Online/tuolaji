@@ -1,0 +1,48 @@
+name: ci
+
+# Build the canister artifacts and publish them on a tag push.
+# Linux (Ubuntu) only: the released `vessel-linux64` binary is used.
+on:
+  push:
+    tags:
+      - '*'
+
+permissions:
+  contents: write
+
+env:
+  VESSEL_VERSION: v0.8.0
+
+jobs:
+  build:
+    # Linux only — no other platforms are built or released.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install vessel
+        run: |
+          curl -fsSL -o /usr/local/bin/vessel \
+            "https://github.com/caffeinelabs/vessel/releases/download/${VESSEL_VERSION}/vessel-linux64"
+          chmod +x /usr/local/bin/vessel
+          vessel --version
+
+      - name: Install the Motoko compiler and packages
+        run: |
+          vessel bin
+          vessel install
+          echo "$PWD/$(vessel bin)" >> "$GITHUB_PATH"
+
+      - name: Build tuolaji.wasm and tuolaji.did
+        run: |
+          PKGS="$(vessel sources)"
+          moc $PKGS --public-metadata candid:service --public-metadata candid:args -o tuolaji.wasm src/main.mo
+          moc $PKGS --idl -o tuolaji.did src/main.mo
+          ls -l tuolaji.wasm tuolaji.did
+
+      - name: Release the build artifacts
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            tuolaji.wasm
+            tuolaji.did
