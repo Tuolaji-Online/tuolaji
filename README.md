@@ -1,6 +1,6 @@
 # Tuolaji on the Internet Computer
 
-A Motoko canister that hosts **Tuolaji (升级)** — a four-seat,
+A Motoko canister that hosts the backend of https://tuolaji.online — a four-seat,
 partnership, trick-taking card game. One canister hosts many independent tables
 and is the sole rule authority: clients send commands and read a caller-scoped
 view, and the server validates every move.
@@ -16,14 +16,24 @@ view, and the server validates every move.
 - Declarations, the bank/banker, the kitty bury, lead/follow legality, throw
   penalties, trick points and deal scoring are all adjudicated server-side.
 
-Full rules: [./RULES.md](./RULES.md).
+Full rules are documented in [./RULES.md](./RULES.md), serving as the definitive
+guide on how to play Tuolaji. More accessible and interactive tutorials can
+be found on https://tuolaji.online.
 
 ## Trust model
 
 Trust-minimized: the game runs on a blockchain, so the code is law — every move
 is validated on-chain and there is no hidden backdoor. The shuffle is
-`raw_rand`-seeded Fisher–Yates, and hands and the kitty are hidden by
-principal-scoped views.
+Fisher–Yates seeded from [verifiable randomess](https://docs.internetcomputer.org/concepts/verifiable-randomness/),
+and hands and the kitty are hidden by principal-scoped views.
+
+The code has been deployed on Internet Computer as the following canister(s):
+
+- [rpi5u-uaaaa-aaaas-qg4jq-cai](https://dashboard.internetcomputer.org/canister/rpi5u-uaaaa-aaaas-qg4jq-cai)
+
+The deployed module hash should match what has been built by GitHub from the
+download section on GitHub, which gives further assurance that both the
+build and deployment are verifiable against the published source code.
 
 ## The canister
 
@@ -56,6 +66,11 @@ Commands are **update calls**; reads are **query calls**. There is no socket.
 - Canister callers may register a **push client** instead: the server sends
   one-way `Push` batches to the caller's `receive` and advances its cursor. The
   client calls `sync` on any gap or `fullSync`.
+
+Besides playing on https://tuolaji.online, people are encouraged to make bots
+either as a client or as a canister to play the game. Canister bots will have
+to pay a small amount of cycles for each update call, which helps to subsidize
+the game server's operation.
 
 ## Server API
 
@@ -131,3 +146,18 @@ Defaults: `targetLevel 14`, `dealTickSeconds 1`, `declareSeconds 15`,
 `overrideSeconds 10`, `burySeconds 60`, `playSeconds 45`,
 `eventRetentionSeconds 259200`, `firstDealer 0`, `enhancedJokerOverride false`,
 `endWhenAllBots true`.
+
+## Contributing
+
+Contributions are welcome — code, rules, tests, translations, and docs.
+
+**Ways to help**
+
+- **Report bugs and rules disagreements** by opening an
+  [issue](https://github.com/ninegua/tuolaji/issues). If it happened at a
+  table, use the in-app problem-report button so the report is attached to the
+  exact table and deal.
+- **Improve the rules.** [`RULES.md`](./RULES.md) aims to be the definitive
+  standard for this game, written in English.
+  If the engine and the docs disagree, that is a bug — please say which you
+  believe is right.

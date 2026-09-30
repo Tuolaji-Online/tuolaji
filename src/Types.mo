@@ -371,8 +371,10 @@ module {
 
   /// The interface the game canister calls to push to a bot. A mismatch in this
   /// shape must drop the subscription, never trap the game canister.
+  /// Note that it's return type is () instead of async () because this is supposed
+  /// to be a best-effort one-way call, and the caller doesn't expect a response.
   public type Bot = actor {
-    receive : (Push) -> async ();
+    receive : (Push) -> ();
   };
 
   // ── views ──────────────────────────────────────────────────────────
