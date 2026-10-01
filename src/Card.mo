@@ -11,8 +11,10 @@
 /// Ranks are represented as numbers 2..14 with 11=J, 12=Q, 13=K, 14=A.
 /// The current level is one of those rank numbers.
 import Array "mo:core/Array";
+import List "mo:core/List";
 import Nat "mo:core/Nat";
 import VarArray "mo:core/VarArray";
+import Util "Util";
 
 module {
   /// A card identity, 1..108.
@@ -300,32 +302,64 @@ module {
   /// then pair key and raw id. Deterministic, so a client's card order never
   /// leaks into the state or the event log.
   public func sortPlay(cards : [Card], game : Game) : [Card] {
-    let out = Array.toVarArray<Card>(cards);
-    var i = 1;
-    while (i < out.size()) {
-      let key = out[i];
-      var j = i;
-      while (j > 0 and playAfter(out[j - 1], key, game)) {
-        out[j] := out[j - 1];
-        j -= 1;
-      };
-      out[j] := key;
-      i += 1;
-    };
-    VarArray.toArray<Card>(out);
+    Util.sortBy<Card>(cards, func(a, b) = playCompare(a, b, game));
   };
 
-  /// True when `a` belongs after `b` in `sortPlay`'s order.
-  func playAfter(a : Card, b : Card, game : Game) : Bool {
+  /// Three-way form of `sortPlay`'s order: positive when `a` belongs after
+  /// `b`, negative when before, zero when equal.
+  func playCompare(a : Card, b : Card, game : Game) : Int {
     let ta = isTrump(a, game);
     let tb = isTrump(b, game);
-    if (ta != tb) { return tb };
+    if (ta != tb) { return if (tb) { 1 } else { -1 } };
     let ra = rankValue(a, game);
     let rb = rankValue(b, game);
-    if (ra != rb) { return ra < rb };
+    if (ra != rb) { return Util.cmpNat(rb, ra) };
     let ka = pairKeyId(a);
     let kb = pairKeyId(b);
-    if (ka != kb) { return ka > kb };
-    a > b;
+    if (ka != kb) { return Util.cmpNat(ka, kb) };
+    Util.cmpNat(a, b);
+  };
+
+  // ── card-list helpers shared by the rule modules ───────────────────
+
+  /// True when `c` is an element of `hand`.
+  public func contains(hand : [Card], c : Card) : Bool {
+    var found = false;
+    for (x in hand.vals()) { if (x == c) { found := true } };
+    found;
+  };
+
+  /// True when the same physical card appears more than once in `cards`.
+  public func hasDuplicate(cards : [Card]) : Bool {
+    var i = 0;
+    while (i < cards.size()) {
+      var j = i + 1;
+      while (j < cards.size()) {
+        if (cards[i] == cards[j]) { return true };
+        j += 1;
+      };
+      i += 1;
+    };
+    false;
+  };
+
+  /// Multiset difference `hand - remove`, preserving `hand` order. Each
+  /// element of `remove` cancels at most one matching element of `hand`.
+  public func difference(hand : [Card], remove : [Card]) : [Card] {
+    let used = VarArray.repeat(false, remove.size());
+    let out = List.empty<Card>();
+    for (c in hand.vals()) {
+      var removed = false;
+      var i = 0;
+      while (i < remove.size() and not removed) {
+        if (not used[i] and remove[i] == c) {
+          used[i] := true;
+          removed := true;
+        };
+        i += 1;
+      };
+      if (not removed) { out.add(c) };
+    };
+    out.toArray();
   };
 }

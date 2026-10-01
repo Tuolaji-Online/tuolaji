@@ -24,8 +24,10 @@ be found on https://tuolaji.online.
 
 Trust-minimized: the game runs on a blockchain, so the code is law — every move
 is validated on-chain and there is no hidden backdoor. The shuffle is
-Fisher–Yates seeded from [verifiable randomess](https://docs.internetcomputer.org/concepts/verifiable-randomness/),
-and hands and the kitty are hidden by principal-scoped views.
+Fisher–Yates driven by [verifiable randomness](https://docs.internetcomputer.org/concepts/verifiable-randomness/),
+and the deal's entropy is published once the deal is scored (`ShuffleRevealed`),
+so anyone can replay the shuffle and check it. Hands and the kitty are hidden by
+principal-scoped views.
 
 The code has been deployed on Internet Computer as the following canister(s):
 

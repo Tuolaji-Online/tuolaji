@@ -4,9 +4,9 @@
 /// extractSlots / compareSlots / highestByComponents.
 import Array "mo:core/Array";
 import List "mo:core/List";
-import VarArray "mo:core/VarArray";
 import Card "Card";
 import Combo "Combo";
+import Util "Util";
 
 module {
   public type Play = {
@@ -24,29 +24,12 @@ module {
 
   type Slot = { kind : Combo.ComponentKind; length : Nat; topRank : Nat };
 
-  func cmpNat(a : Nat, b : Nat) : Int {
-    if (a < b) { -1 } else if (a > b) { 1 } else { 0 }
-  };
-
   func sortSlots(slots : [Slot]) : [Slot] {
-    let out = Array.toVarArray<Slot>(slots);
-    var i = 1;
-    while (i < out.size()) {
-      let key = out[i];
-      var j = i;
-      func after(x : Slot, y : Slot) : Bool {
-        let sx = Combo.componentStrength(x.kind);
-        let sy = Combo.componentStrength(y.kind);
-        if (sx != sy) { sx < sy } else { x.topRank < y.topRank };
-      };
-      while (j > 0 and after(out[j - 1], key)) {
-        out[j] := out[j - 1];
-        j -= 1;
-      };
-      out[j] := key;
-      i += 1;
-    };
-    VarArray.toArray(out);
+    Util.sortBy<Slot>(slots, func(a, b) {
+      let sa = Combo.componentStrength(a.kind);
+      let sb = Combo.componentStrength(b.kind);
+      if (sa != sb) { Util.cmpNat(sb, sa) } else { Util.cmpNat(b.topRank, a.topRank) };
+    });
   };
 
   /// A kill must match the lead's type and card count, and be all trump.
@@ -98,9 +81,9 @@ module {
   func compareSlotValues(a : Slot, b : Slot) : Int {
     let ta = Combo.componentStrength(a.kind);
     let tb = Combo.componentStrength(b.kind);
-    if (ta != tb) { return cmpNat(ta, tb) };
-    if (a.topRank != b.topRank) { return cmpNat(a.topRank, b.topRank) };
-    cmpNat(a.length, b.length);
+    if (ta != tb) { return Util.cmpNat(ta, tb) };
+    if (a.topRank != b.topRank) { return Util.cmpNat(a.topRank, b.topRank) };
+    Util.cmpNat(a.length, b.length);
   };
 
   func compareSlots(a : Candidate, b : Candidate, lead : Combo.Lead, game : Card.Game) : Int {
@@ -132,8 +115,8 @@ module {
     0;
   };
 
-  func highestByComponents(candidates : [Candidate], lead : Combo.Lead, game : Card.Game) : Nat {
-    if (candidates.size() == 0) { return 0 };
+  func highestByComponents(candidates : [Candidate], lead : Combo.Lead, game : Card.Game, fallback : Nat) : Nat {
+    if (candidates.size() == 0) { return fallback };
     var best = candidates[0];
     var i = 1;
     while (i < candidates.size()) {
@@ -179,17 +162,17 @@ module {
       let killers = validKillers.toArray();
       if (lead.kind == #Throw) {
         if (killers.size() == 0) { return plays[0].seat };
-        return highestByComponents(killers, lead, game);
+        return highestByComponents(killers, lead, game, plays[0].seat);
       };
       if (killers.size() > 0) {
-        return highestByComponents(killers, lead, game);
+        return highestByComponents(killers, lead, game, plays[0].seat);
       };
       let sameSuit = List.empty<Candidate>();
       for (c in all.vals()) {
         if (not c.isKill) { sameSuit.add(c) };
       };
-      return highestByComponents(sameSuit.toArray(), lead, game);
+      return highestByComponents(sameSuit.toArray(), lead, game, plays[0].seat);
     };
-    highestByComponents(all, lead, game);
+    highestByComponents(all, lead, game, plays[0].seat);
   };
 }

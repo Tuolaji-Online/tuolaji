@@ -9,12 +9,6 @@ import Combo "Combo";
 import Types "Types";
 
 module {
-  func containsCard(hand : [Card.Card], c : Card.Card) : Bool {
-    var found = false;
-    for (x in hand.vals()) { if (x == c) { found := true } };
-    found;
-  };
-
   func longestTractorLength(comps : [Combo.Component]) : Nat {
     var best = 0;
     for (c in comps.vals()) {
@@ -40,7 +34,7 @@ module {
   ) : ?Types.CheckError {
     // R1: ownership.
     for (c in play.vals()) {
-      if (not containsCard(hand, c)) {
+      if (not Card.contains(hand, c)) {
         return ?{ code = #CardNotInHand; detail = "card not in hand" };
       };
     };
@@ -49,7 +43,7 @@ module {
     // across lead (not already in hand) and this hand.
     let fvCount = VarArray.repeat<Nat>(0, Card.PAIR_KEY_COUNT);
     for (c in leadPlay.vals()) {
-      if (not containsCard(hand, c)) {
+      if (not Card.contains(hand, c)) {
         let k = Card.faceKey(c);
         fvCount[k] += 1;
       };

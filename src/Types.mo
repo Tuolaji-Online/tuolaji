@@ -97,7 +97,7 @@ module {
   public type TableConfig = {
     targetLevel : Level;
     dealTickSeconds : Nat;
-    declareSeconds : ?Nat; // post-deal declaration window; null = default immediately
+    declareSeconds : ?Nat; // post-deal declaration window; null = lock as soon as the deck is out
     overrideSeconds : ?Nat; // counter-declaration window after a call; null = lock immediately
     burySeconds : ?Nat; // banker kitty timeout; null = wait indefinitely
     playSeconds : ?Nat; // turn timeout -> auto-play; null = wait indefinitely
@@ -322,6 +322,7 @@ module {
     #PlayerLeft : { seat : Seat };
     #PlayerReady : { seat : Seat };
     #DealStarted : { dealNo : Nat; dealer : Seat; level : Level };
+    #ShuffleRevealed : { entropy : Blob }; // deal entropy, published once the deal is scored
     #DealTick : { dealt : Nat; toSeat : Seat };
     #HandUpdated : { seat : Seat; added : [Card.Card]; hand : [Card.Card] }; // private
     #TrumpDeclared : { seat : Seat; kind : DeclareKind; suit : Suit };
@@ -386,12 +387,6 @@ module {
     attackerLevel : Level;
   };
 
-  public type LegalHints = {
-    mustLead : Bool;
-    singleCards : [Card.Card];
-    sampleCombos : [[Card.Card]];
-  };
-
   public type PlayerView = {
     tableId : TableId;
     dealNo : Nat;
@@ -419,7 +414,6 @@ module {
     // Seconds of the currently armed declaration window (Dealing only), so the
     // client can size the countdown ring even when a call extended the window.
     declareTotal : ?Nat;
-    legal : ?LegalHints;
   };
 
   /// Read-only cost/observability snapshot.

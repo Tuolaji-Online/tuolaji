@@ -42,6 +42,15 @@ module {
   /// `createTable`/`joinTable`, so abandoned tables cannot be joined or linger.
   public let IDLE_RETENTION_NANOS : Int = 600_000_000_000; // 10 minutes
 
+  /// How often the timer retries an auto-play whose heuristic move was
+  /// rejected, so a bug cannot leave a turn with no armed deadline.
+  public let AUTO_RETRY_NANOS : Int = 5_000_000_000; // 5 seconds
+
+  /// Short deadline armed for a seat that has no owner (a leaver mid-deal),
+  /// so the timer drives its turns and bury instead of waiting forever on a
+  /// config with null timeouts.
+  public let EMPTY_SEAT_NANOS : Int = 1_000_000_000; // 1 second
+
   /// Longest avatar id string accepted from a client. Client text is an attack
   /// vector, so the canister bounds each field tightly (20 chars is far more
   /// than any preset/style id) and rejects anything empty or longer.
@@ -71,6 +80,7 @@ module {
     var hands : [var [Card.Card]];
     var kitty : [Card.Card];
     var deck : [Card.Card];
+    var dealEntropy : Blob;
     var dealIdx : Nat;
     var dealComplete : Bool;
     var declareDeadline : ?Types.Timestamp;
@@ -285,7 +295,12 @@ module {
         if (count <= maxEvents) { events.add(e) };
       };
     };
-    { events = events.toArray(); fullSync = count > maxEvents };
+    let truncated = count > maxEvents;
+    let gap = watermark + 1 < st.lowWater;
+    {
+      events = if (truncated) { [] } else { events.toArray() };
+      fullSync = gap or truncated;
+    };
   };
 
   /// A push to `principal` may carry a private `HandUpdated` only for a seat
@@ -455,6 +470,7 @@ module {
       var hands = [var [], [], [], []];
       var kitty = [];
       var deck = [];
+      var dealEntropy = "";
       var dealIdx = 0;
       var dealComplete = false;
       var declareDeadline = null;
@@ -542,8 +558,9 @@ module {
     if (not validAvatar(avatar)) { return err(st, #InvalidAvatar, "invalid avatar") };
     switch (st.seats[seat]) {
       case null {
-        // An open seat can only be taken in the lobby.
-        if (st.phase != #Lobby) { return err(st, #NotInLobby, "not in lobby") };
+        // An open seat can be taken in the lobby, or in `#Scoring` so a seat
+        // that emptied mid-deal can be refilled before the next deal.
+        if (st.phase != #Lobby and st.phase != #Scoring) { return err(st, #NotInLobby, "not in lobby") };
         st.seats[seat] := ?{ principal = caller; clientId; client = null; takenAt = st.seq };
         st.ready[seat] := false;
         st.avatars[seat] := avatar;
@@ -569,40 +586,6 @@ module {
     };
   };
 
-  /// Abandon an in-progress deal and return to `#Lobby`: clear the per-deal
-  /// state and require a fresh ready from every human, while keeping the
-  /// table-level progress (levels/bank/epoch) and the dealer. Used when a seat
-  /// leaves without handing its seat to a bot, since the deal cannot continue.
-  func abandonDeal(st : State) {
-    st.phase := #Lobby;
-    st.deck := [];
-    st.dealIdx := 0;
-    st.dealComplete := false;
-    st.declareDeadline := null;
-    st.declareTotal := null;
-    st.hands := [var [], [], [], []];
-    st.kitty := [];
-    st.banker := null;
-    st.trump := null;
-    st.decl := null;
-    st.firstSeat := (st.dealer + 1) % 4;
-    st.nextSeat := st.dealer;
-    st.nextDealAt := null;
-    st.buryDeadline := null;
-    st.deadline := null;
-    st.trick := List.empty();
-    st.lead := null;
-    st.leadCards := [];
-    st.trickNo := 0;
-    st.bankerPoints := 0;
-    st.attackerPoints := 0;
-    st.played := Basic.emptyPlayed();
-    st.voids := Basic.emptyVoids();
-    st.kittyRevealed := false;
-    st.lastTrick := null;
-    resetReady(st);
-  };
-
   /// Leave the table in any live phase; when the last seat empties the table
   /// ends (freeing the per-principal cap) and emits `TableEnded`. `reserveFor`
   /// controls what happens to the vacated seat:
@@ -610,9 +593,10 @@ module {
   /// - `?p`: the seat is claimed for `p` (e.g. the trusted bot principal) and
   ///   the deal keeps playing (the seat's hand is kept), so `p` can attach and
   ///   take over mid-deal. The claim is silent; `p`'s own join announces it.
-  /// - `null`: the seat is left open. An in-progress deal cannot continue, so
-  ///   it is abandoned and the table returns to `#Lobby`; table-level progress
-  ///   is kept.
+  /// - `null`: the seat is left open but an in-progress deal keeps playing —
+  ///   the timer auto-plays the empty seat, so leaving cannot dodge the deal's
+  ///   result. The deal is scored normally; the seat can be rejoined in the
+  ///   lobby or the next `#Scoring` phase.
   public func leave(
     st : State,
     caller : Principal,
@@ -647,13 +631,8 @@ module {
             st.ready[s] := false;
           };
           case null {
-            if (st.phase != #Lobby and st.phase != #Ended) {
-              // No seat to continue the deal: abort it so the now-empty seat
-              // is joinable again (otherwise the deal would stall).
-              abandonDeal(st);
-            } else {
-              st.ready[s] := false;
-            };
+            st.ready[s] := false;
+            ensureEmptySeatProgress(st, s, now);
           };
         };
         if (filledCount(st) == 0) {
@@ -788,6 +767,7 @@ module {
     st.phase := #Dealing;
     st.dealNo += 1;
     st.deck := [];
+    st.dealEntropy := "";
     // The deal is played at the banking team's own level. A brand-new
     // table (bank not yet decided) starts at level 2 for both teams.
     st.level := switch (st.bankTeam) { case (?bt) { st.teamLevel[bt] }; case null { 2 } };
@@ -834,20 +814,28 @@ module {
     }
   };
 
-  /// The displayed turn deadline for the configured `playSeconds` (null when
-  /// the table waits forever).
-  func turnDeadline(st : State, now : Types.Timestamp) : ?Types.Timestamp {
-    switch (st.cfg.playSeconds) {
-      case (?s) { ?(now + secondsToNanos(s)) };
-      case null { null };
+  /// The empty seat's hand is played by the timer. If the config would leave
+  /// the current turn or bury without a deadline, arm a short one so the
+  /// scheduler does not stall on a seat that can no longer act.
+  func ensureEmptySeatProgress(st : State, s : Types.Seat, now : Types.Timestamp) {
+    let tick = now + EMPTY_SEAT_NANOS;
+    if (st.phase == #Playing and st.nextSeat == s and st.deadline == null) {
+      st.deadline := ?tick;
+    };
+    if (st.phase == #Burying and st.banker == ?s and st.buryDeadline == null) {
+      st.buryDeadline := ?tick;
     };
   };
 
   /// Begin `seat`'s turn and record the configured deadline for display; the
-  /// scheduler auto-plays the seat if the deadline passes.
+  /// scheduler auto-plays the seat if the deadline passes. An ownerless seat
+  /// always gets a deadline so the timer keeps the deal moving.
   func startTurn(st : State, seat : Types.Seat, now : Types.Timestamp) {
     st.nextSeat := seat;
-    st.deadline := turnDeadline(st, now);
+    st.deadline := switch (st.cfg.playSeconds) {
+      case (?s) { ?(now + secondsToNanos(s)) };
+      case null { if (st.seats[seat] == null) { ?(now + EMPTY_SEAT_NANOS) } else { null } };
+    };
   };
 
   /// Arm or extend the declaration deadline. The deadline only ever moves
@@ -881,8 +869,10 @@ module {
   /// Install a shuffled deck and start dealing. Idempotent.
   public func startDeal(st : State, entropy : Blob, now : Types.Timestamp) {
     if (not needsShuffle(st)) { return };
-    let seed = Shuffle.seedFromBlob(entropy);
-    installDeck(st, Shuffle.shuffle(Shuffle.newDeck(), seed), now);
+    // Keep the entropy so the shuffle can be replayed and audited once the
+    // deal is scored (`#ShuffleRevealed`).
+    st.dealEntropy := entropy;
+    installDeck(st, Shuffle.shuffleWithEntropy(Shuffle.newDeck(), entropy), now);
   };
 
   /// Install an explicit deck (tests / deterministic replay) and emit
@@ -1005,7 +995,7 @@ module {
     st.phase := #Burying;
     st.buryDeadline := switch (st.cfg.burySeconds) {
       case (?s) { ?(now + secondsToNanos(s)) };
-      case null { null };
+      case null { if (st.seats[bankerSeat] == null) { ?(now + EMPTY_SEAT_NANOS) } else { null } };
     };
     st.deadline := st.buryDeadline;
     ignore append(st, now, #KittyReceived({ dealer = bankerSeat; count = 8 }));
@@ -1045,7 +1035,7 @@ module {
     now : Types.Timestamp,
   ) : Types.ActionResult {
     if (st.phase != #Dealing) { return err(st, #WrongPhase, "not dealing") };
-    if (hasDuplicate(cards)) { return err(st, #DuplicateCard, "duplicate declaration card") };
+    if (Card.hasDuplicate(cards)) { return err(st, #DuplicateCard, "duplicate declaration card") };
     // Declarations stay open for the whole deal. Only once the deck is
     // exhausted does the counter-declaration window gate them (it is
     // armed at deck end and re-armed by each accepted declaration), so
@@ -1092,54 +1082,25 @@ module {
 
   // ── bury ───────────────────────────────────────────────────────────
 
-  func containsCard(hand : [Card.Card], c : Card.Card) : Bool {
-    var found = false;
-    for (x in hand.vals()) { if (x == c) { found := true } };
-    found;
-  };
-
-  func hasDuplicate(cards : [Card.Card]) : Bool {
-    var i = 0;
-    while (i < cards.size()) {
-      var j = i + 1;
-      while (j < cards.size()) {
-        if (cards[i] == cards[j]) { return true };
-        j += 1;
-      };
-      i += 1;
-    };
-    false;
-  };
-
-  /// Multiset difference `hand - remove`, preserving `hand` order.
-  func removeAll(hand : [Card.Card], remove : [Card.Card]) : [Card.Card] {
-    let used = VarArray.repeat(false, remove.size());
-    let out = List.empty<Card.Card>();
-    for (c in hand.vals()) {
-      var removed = false;
-      var i = 0;
-      while (i < remove.size() and not removed) {
-        if (not used[i] and remove[i] == c) { used[i] := true; removed := true };
-        i += 1;
-      };
-      if (not removed) { out.add(c) };
-    };
-    out.toArray();
-  };
-
-  /// The banker's basic bury (`Basic.buryMove`): the 8 lowest cards, non-trumps
-  /// first.
+  /// The banker's basic bury (`Basic.buryMove`): the 8 least valuable cards,
+  /// preferring 0-point cards and non-trumps.
   func autoBuryCards(hand : [Card.Card], game : Card.Game) : [Card.Card] {
     Basic.buryMove(hand, game);
   };
 
   func placeBury(st : State, seat : Types.Seat, cards : [Card.Card], auto : Bool, now : Types.Timestamp) {
-    st.hands[seat] := removeAll(st.hands[seat], cards);
+    st.hands[seat] := Card.difference(st.hands[seat], cards);
     st.kitty := cards;
     st.buryDeadline := null;
     st.phase := #Playing;
     startTurn(st, seat, now);
     ignore append(st, now, #KittyBuried({ dealer = seat; count = 8; auto }));
+    // Re-emit the banker's hand after the bury (private to that seat). A bury
+    // the server auto-plays on timeout otherwise leaves a push-based client
+    // (the bot) holding the eight buried cards, so every later play is
+    // rejected as "card not in hand". The buried cards stay hidden: only the
+    // remaining hand is sent, and only to the banker.
+    ignore append(st, now, #HandUpdated({ seat; added = []; hand = st.hands[seat] }));
     ignore append(st, now, #TurnStarted({ seat; lead = null; deadline = st.deadline }));
   };
 
@@ -1168,9 +1129,9 @@ module {
           case null { return err(st, #NotKittyOwner, "no banker") };
         };
         if (cards.size() != 8) { return err(st, #KittySizeMismatch, "must bury 8 cards") };
-        if (hasDuplicate(cards)) { return err(st, #DuplicateCard, "duplicate buried card") };
+        if (Card.hasDuplicate(cards)) { return err(st, #DuplicateCard, "duplicate buried card") };
         for (c in cards.vals()) {
-          if (not containsCard(st.hands[s], c)) {
+          if (not Card.contains(st.hands[s], c)) {
             return err(st, #CardNotInHand, "buried card not in hand");
           };
         };
@@ -1285,27 +1246,6 @@ module {
     switch (st.lead) { case (?l) { ?Combo.toInfo(l) }; case null { null } };
   };
 
-  func legalHints(st : State, mySeat : ?Types.Seat) : ?Types.LegalHints {
-    switch (mySeat) {
-      case null { null };
-      case (?s) {
-        if (st.phase != #Playing or st.nextSeat != s) {
-          ?{ mustLead = false; singleCards = []; sampleCombos = [] };
-        } else {
-          let hand = st.hands[s];
-          let mustLead = st.trick.size() == 0;
-          ?{
-            mustLead;
-            singleCards = hand;
-            sampleCombos = if (mustLead) {
-              Array.map<Card.Card, [Card.Card]>(hand, func(c) = [c]);
-            } else { [] };
-          };
-        };
-      };
-    };
-  };
-
   /// Resolve a completed trick: winner, points, kitty scoop, and then either
   /// start the next turn or score the deal.
   func resolveTrick(st : State, now : Types.Timestamp) {
@@ -1357,6 +1297,9 @@ module {
     st.kittyRevealed := true;
     let b = bankerSeat(st);
     ignore append(st, now, #KittyRevealed({ dealer = b; cards = st.kitty }));
+    // Publish the deal entropy now that the deal is over, so anyone can replay
+    // the Fisher–Yates shuffle and verify the deal was not manipulated.
+    ignore append(st, now, #ShuffleRevealed({ entropy = st.dealEntropy }));
 
     let outcome = Scoring.compute(st.attackerPoints);
     // The deal was played at the current banking team's level. Advancing that
@@ -1382,9 +1325,9 @@ module {
     // The deal was played at the bankers' pre-deal level. Only winning *while
     // already at `targetLevel` completes the epoch; reaching A from K merely
     // queues the A deal. On completion only the winning partnership advances:
-    // its epoch increments and its level carries one no-skip step (so a win at
-    // A starts that team's next epoch at 3). The other partnership keeps its
-    // own epoch and level.
+    // its epoch increments and its level resets to 2 + the levels gained this
+    // deal (capped at A), so a 0-point hold at A starts the next epoch at 5.
+    // The other partnership keeps its own epoch and level.
     let reachedTarget = outcome.winner == #Bankers and playedLevel >= st.cfg.targetLevel;
     ignore append(st, now, #DealScored({
       attackerPoints = st.attackerPoints;
@@ -1468,7 +1411,7 @@ module {
         case null {};
       };
     };
-    st.hands[s] := removeAll(hand, played);
+    st.hands[s] := Card.difference(hand, played);
     let playedCounts = Array.toVarArray<Nat>(st.played);
     for (c in played.vals()) { playedCounts[Card.pairKeyId(c)] += 1 };
     st.played := VarArray.toArray<Nat>(playedCounts);
@@ -1480,7 +1423,7 @@ module {
       ignore append(st, now, #ThrowPenalized({
         seat = s;
         forced = played;
-        returned = Card.sortPlay(removeAll(cards, played), game);
+        returned = Card.sortPlay(Card.difference(cards, played), game);
       }));
     };
     ignore append(st, now, #CardsPlayed({ seat = s; cards = played; combo = comboInfo }));
@@ -1522,7 +1465,7 @@ module {
         };
         if (st.nextSeat != s) { return err(st, #NotYourTurn, "not your turn") };
         if (cards.size() == 0) { return err(st, #InvalidCard, "empty play") };
-        if (hasDuplicate(cards)) { return err(st, #DuplicateCard, "duplicate cards in play") };
+        if (Card.hasDuplicate(cards)) { return err(st, #DuplicateCard, "duplicate cards in play") };
         applyPlay(st, s, cards, now, false);
       };
     };
@@ -1568,11 +1511,15 @@ module {
           };
         };
         if (recovered) { return true };
+        // A follow's `Basic` move is legal in the tested corpus; if one ever is
+        // not, do not wedge the table. Re-arm the turn a few seconds out so the
+        // scheduler retries (and a client can still act), instead of leaving no
+        // timer armed until the idle sweep ends the table.
+        st.deadline := ?(now + AUTO_RETRY_NANOS);
         Debug.print(
-          "tractor: auto-play gave up for table " # Nat.toText(st.id)
+          "tractor: auto-play retry for table " # Nat.toText(st.id)
           # " seat " # Nat.toText(s) # ": " # e.detail
         );
-        st.deadline := null;
         false;
       };
     };
@@ -1946,7 +1893,6 @@ module {
         case (#Dealing) { st.declareTotal };
         case _ { null };
       };
-      legal = legalHints(st, mySeat);
     };
   };
 
@@ -1995,9 +1941,9 @@ module {
       // The next deal is played at the bank's level, so the bank's epoch is the
       // one the lobby should show.
       epoch = st.teamEpoch[bankTeamOf(st)];
-      // Only a truly empty seat makes a table joinable without replacing a
-      // bot; a replaceable seat is entered through its own avatar instead.
-      joinable = st.phase == #Lobby and hasEmptySeat(st);
+      // A truly empty seat makes a table joinable; in `#Scoring` the next
+      // deal has not started, so a seat that emptied mid-deal can be refilled.
+      joinable = (st.phase == #Lobby or st.phase == #Scoring) and hasEmptySeat(st);
       banker = prospectiveBanker(st);
       config = st.cfg;
       startedAt = st.startedAt;

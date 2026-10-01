@@ -2,6 +2,7 @@
 /// trump declarations during dealing (I8), bury + kitty handling (I1 partial),
 /// privacy of dealt hands, and the bury deadline / auto-bury path (I9).
 import Array "mo:core/Array";
+import Nat "mo:core/Nat";
 import Principal "mo:core/Principal";
 import VarArray "mo:core/VarArray";
 import Card "../src/Card";
@@ -139,6 +140,25 @@ module {
 
     let b = Array.toBlob([1, 2, 3, 4, 5, 6, 7, 8]);
     t.check(Shuffle.seedFromBlob(b) == Shuffle.seedFromBlob(b), "seedFromBlob is deterministic");
+
+    // Entropy-driven shuffle: deterministic in the blob, a permutation, and
+    // empty entropy leaves the deck untouched (the explicit-deck test path).
+    let entropy = Array.toBlob(Array.tabulate<Nat8>(32, func(i) = Nat.toNat8(i * 7 + 1)));
+    let h1 = Shuffle.shuffleWithEntropy(deck, entropy);
+    let h2 = Shuffle.shuffleWithEntropy(deck, entropy);
+    var sameEntropy = true;
+    var permEntropy = true;
+    let seenE = VarArray.repeat(false, 109);
+    i := 0;
+    while (i < 108) {
+      if (h1[i] != h2[i]) { sameEntropy := false };
+      if (seenE[h1[i]]) { permEntropy := false };
+      seenE[h1[i]] := true;
+      i += 1;
+    };
+    t.check(sameEntropy, "shuffleWithEntropy is deterministic in the entropy");
+    t.check(permEntropy, "shuffleWithEntropy is a permutation");
+    t.check(Shuffle.shuffleWithEntropy(deck, "")[0] == deck[0], "empty entropy leaves the deck untouched");
   };
 
   // ── I8: dealing ticks ──────────────────────────────────────────────
@@ -324,13 +344,26 @@ module {
 
     let p = Table.poll(st, ps[0], 0);
     var sawAuto = false;
+    var burySeq = 0;
     for (e in p.events.vals()) {
       switch (e.body) {
-        case (#KittyBuried(k)) { if (k.auto) { sawAuto := true } };
+        case (#KittyBuried(k)) { if (k.auto) { sawAuto := true }; burySeq := e.seq };
         case _ {};
       };
     };
     t.check(sawAuto, "auto-bury emits KittyBuried{auto=true}");
+    // The auto-bury must re-emit the banker's post-bury hand, so a push-based
+    // client does not keep the eight buried cards and play them later.
+    var sawPostBuryHand = false;
+    for (e in p.events.vals()) {
+      switch (e.body) {
+        case (#HandUpdated(h)) {
+          if (h.seat == 0 and e.seq > burySeq and h.hand.size() == 25) { sawPostBuryHand := true };
+        };
+        case _ {};
+      };
+    };
+    t.check(sawPostBuryHand, "auto-bury re-emits the banker's post-bury hand (25 cards)");
 
     // A null deadline waits indefinitely (v1 default).
     let st2 = seated(noTimeouts, ps);

@@ -3,6 +3,7 @@
 /// against `Table.mo` with distinct principals.
 import Principal "mo:core/Principal";
 import Nat "mo:core/Nat";
+import Array "mo:core/Array";
 import List "mo:core/List";
 import Card "../src/Card";
 import Table "../src/Table";
@@ -235,21 +236,28 @@ module {
     };
     t.check(saw, "TableEnded emitted when the last seat leaves");
 
-    // Leaving mid-game abandons the deal back to the lobby so the vacated seat
-    // is joinable again; table-level progress is kept but the per-deal state is
-    // cleared.
+    // Leaving mid-game keeps the deal playing: the empty seat is auto-played,
+    // so a leaver cannot dodge the deal's result, and the level change stands.
     let st3 = fresh(ps);
-    Table.debugForce(st3, #Playing, ?0, 0);
+    Table.debugForce(st3, #Playing, ?0, 1);
     st3.trump := ?1;
     st3.kittyRevealed := true;
     st3.hands[0] := [1, 2];
+    st3.hands[1] := [3, 4];
     t.check(isOk(Table.leave(st3, ps[1], null, 1)), "leaving mid-game is allowed");
-    t.check(phaseEq(Table.info(st3).phase, #Lobby), "leave abandons the deal to the lobby");
-    t.check(Table.info(st3).joinable, "the empty seat reopens the lobby");
-    t.check(st3.trump == null, "the abandoned deal's trump is cleared");
-    t.check(not st3.kittyRevealed, "the abandoned deal's reveal state is cleared");
-    t.equalNat(st3.hands[0].size(), 0, "the abandoned deal's hands are cleared");
-    t.check(isOk(Table.joinTable(st3, ps[4], 1, 2)), "a new principal joins the freed seat");
+    t.check(phaseEq(Table.info(st3).phase, #Playing), "leave keeps the deal playing");
+    t.check(st3.trump == ?1, "the in-progress deal's trump is kept");
+    t.check(st3.kittyRevealed, "the in-progress deal's reveal state is kept");
+    t.equalNat(st3.hands[1].size(), 2, "the leaver's hand is kept for auto-play");
+    t.check(not Table.info(st3).joinable, "a playing table is not joinable mid-deal");
+    t.check(isErr(Table.joinTable(st3, ps[4], 1, 2), #NotInLobby), "the empty seat is not joinable mid-deal");
+    t.check(st3.deadline != null, "the empty seat gets a deadline so the deal keeps moving");
+    t.check(st3.nextSeat == 1, "the empty seat is on turn");
+    t.check(Table.autoPlay(st3, 2_000_000_000), "the timer auto-plays the empty seat");
+    t.equalNat(st3.hands[1].size(), 1, "the auto-play moved one of the leaver's cards");
+    // In #Scoring the deal is over, so the empty seat can be refilled.
+    Table.debugForce(st3, #Scoring, null, 0);
+    t.check(isOk(Table.joinTable(st3, ps[4], 1, 2)), "an empty seat can be refilled in scoring");
 
     // Handing the seat to a bot claims it for that principal and keeps the
     // deal alive; the principal can then attach mid-deal.
@@ -519,6 +527,28 @@ module {
     t.check(not Table.endIfNoHumans(st3, isBot, 2), "an ended table is not re-ended");
   };
 
+  func testShuffleReveal(t : Test.Harness, ps : [Principal]) {
+    t.suite("M3 shuffle reveal");
+    let st = fresh(ps);
+    ignore Table.ready(st, ps[0], 0);
+    ignore Table.ready(st, ps[1], 0);
+    ignore Table.ready(st, ps[2], 0);
+    ignore Table.ready(st, ps[3], 0);
+    t.check(Table.needsShuffle(st), "a shuffle is pending after ready");
+    let entropy = Array.toBlob(Array.tabulate<Nat8>(8, func(i) = Nat.toNat8(i + 1)));
+    Table.startDeal(st, entropy, 0);
+    Table.debugFinishDeal(st, 0);
+    let p = Table.poll(st, ps[0], 0);
+    var found = false;
+    for (e in p.events.vals()) {
+      switch (e.body) {
+        case (#ShuffleRevealed(r)) { if (r.entropy == entropy) { found := true } };
+        case _ {};
+      };
+    };
+    t.check(found, "the scored deal reveals its shuffle entropy");
+  };
+
   public func run(t : Test.Harness) {
     let ps = principals();
     testCursor(t, ps);
@@ -531,6 +561,7 @@ module {
     testNextTimer(t, ps);
     testReservedSeats(t, ps);
     testEndWhenAllBots(t, ps);
+    testShuffleReveal(t, ps);
     testAvatar(t, ps);
     testConfig(t);
   };

@@ -21,8 +21,8 @@ import Types "Types";
 persistent actor {
   // ── Reentrancy discipline ──────────────────────────────────────────
   // Every ingress reads and mutates its table synchronously. The only
-  // `await`s are `Random.blob()` calls (in `ready`/`play` and the timer's
-  // next-deal seal) taken *after* the critical state is committed. Each is
+  // `await`s are `Random.blob()` calls (in `ready` and the timer's seal of a
+  // pending shuffle) taken *after* the critical state is committed. Each is
   // followed by `Table.startDeal`, which re-checks `needsShuffle` and is
   // idempotent, so two racing triggers cannot install two decks.
 
@@ -137,6 +137,25 @@ persistent actor {
     Scheduler.arm<system>(sched, now, fire);
   };
 
+  /// Number of independent `raw_rand` blobs concatenated into one deal's
+  /// entropy. One 32-byte blob is not enough for 108 Fisher–Yates draws; a
+  /// handful guarantees the draws come from real beacon entropy.
+  let ENTROPY_BLOBS : Nat = 8;
+
+  /// Fetch the beacon entropy for a pending shuffle and install the deck. The
+  /// concatenated blob is stored by the table and revealed once the deal is
+  /// scored (`#ShuffleRevealed`), so the shuffle can be replayed and audited.
+  func sealDeal(s : Table.State) : async () {
+    if (not Table.needsShuffle(s)) { return };
+    var bytes : [Nat8] = [];
+    var i = 0;
+    while (i < ENTROPY_BLOBS) {
+      bytes := Array.concat<Nat8>(bytes, Blob.toArray(await Random.blob()));
+      i += 1;
+    };
+    Table.startDeal(s, Array.toBlob(bytes), Time.now());
+  };
+
   /// After an ingress mutates a table: prune its event log
   /// lazily (no timer needed), reschedule it, and re-arm.
   func touch<system>(s : Table.State) : async () {
@@ -201,10 +220,7 @@ persistent actor {
     for (id in due.values()) {
       switch (find(id)) {
         case (?s) {
-          if (Table.needsShuffle(s)) {
-            let entropy = await Random.blob();
-            Table.startDeal(s, entropy, Time.now());
-          };
+          await sealDeal(s);
         };
         case null {};
       };
@@ -699,10 +715,7 @@ persistent actor {
         // A deal was just announced: fetch entropy and shuffle before any
         // client can see a hand. The await happens before the deal state is
         // committed; `startDeal` re-checks the phase.
-        if (Table.needsShuffle(s)) {
-          let entropy = await Random.blob();
-          Table.startDeal(s, entropy, Time.now());
-        };
+        await sealDeal(s);
         ignore touch<system>(s);
         switch (r) {
           case (#ok(_)) { #ok({ seq = Table.seqOf(s); penalized = false }) };
@@ -758,12 +771,6 @@ persistent actor {
           case (?e) { #err({ seq = Table.seqOf(s); code = e.code; detail = e.detail }) };
           case null {
             let r = Table.playWithClient(s, msg.caller, req.clientId, req.cards, Time.now());
-            // The last trick may have started the next deal; seed its shuffle
-            // now that the play state is committed.
-            if (Table.needsShuffle(s)) {
-              let entropy = await Random.blob();
-              Table.startDeal(s, entropy, Time.now());
-            };
             ignore touch<system>(s);
             switch (r) {
               case (#ok(okr)) { #ok({ seq = Table.seqOf(s); penalized = okr.penalized }) };
@@ -855,7 +862,6 @@ persistent actor {
       kitty = null;
       deadline = null;
       declareTotal = null;
-      legal = null;
     };
   };
 }

@@ -62,6 +62,22 @@ module {
       case _ { t.check(false, "beatable throw yields a penalty") };
     };
 
+    // 1b. The forced component is the lowest beatable one, independent of the
+    // order the leader listed the cards (the §7 scan is rank-ordered).
+    func forcedCard(leadStrs : [Text]) : ?Card.Card {
+      switch (throwCheck(2, Card.HEARTS + 1, leadStrs, ["♠6"])) {
+        case (#Penalty(p)) { if (p.forced.size() == 1) { ?p.forced[0] } else { null } };
+        case _ { null };
+      };
+    };
+    switch (forcedCard(["♠A", "♠5", "♠3"]), forcedCard(["♠3", "♠5", "♠A"])) {
+      case (?a, ?b) {
+        t.check(Card.rankOf(a) == ?3, "the lowest beatable single is forced");
+        t.check(a == b, "the forced card does not depend on input order");
+      };
+      case _ { t.check(false, "the lowest beatable single is forced") };
+    };
+
     // 2. Legal throw: each component is maximal.
     switch (throwCheck(2, Card.HEARTS + 1, ["♠A", "♠Q", "♠Q"], ["♠K"])) {
       case (#Ok(_)) { t.check(true, "maximal throw is legal") };

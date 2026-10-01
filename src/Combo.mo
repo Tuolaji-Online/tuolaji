@@ -10,6 +10,7 @@ import Nat "mo:core/Nat";
 import VarArray "mo:core/VarArray";
 import Card "Card";
 import Types "Types";
+import Util "Util";
 
 module {
   public type ComponentKind = { #Single; #Pair; #Tractor };
@@ -35,27 +36,6 @@ module {
 
   // ── generic helpers ────────────────────────────────────────────────
 
-  func cmpNat(a : Nat, b : Nat) : Int {
-    if (a < b) { -1 } else if (a > b) { 1 } else { 0 }
-  };
-
-  func sortBy<T>(arr : [T], cmp : (T, T) -> Int) : [T] {
-    let n = arr.size();
-    let out = Array.toVarArray(arr);
-    var i = 1;
-    while (i < n) {
-      let key = out[i];
-      var j = i;
-      while (j > 0 and cmp(out[j - 1], key) > 0) {
-        out[j] := out[j - 1];
-        j -= 1;
-      };
-      out[j] := key;
-      i += 1;
-    };
-    VarArray.toArray(out);
-  };
-
   public func isSingle(c : Component) : Bool { switch (c.kind) { case (#Single) true; case _ false } };
   public func isPair(c : Component) : Bool { switch (c.kind) { case (#Pair) true; case _ false } };
   public func isTractor(c : Component) : Bool { switch (c.kind) { case (#Tractor) true; case _ false } };
@@ -71,9 +51,9 @@ module {
   public func compareComponents(a : Component, b : Component) : Int {
     let ta = componentStrength(a.kind);
     let tb = componentStrength(b.kind);
-    if (ta != tb) { return cmpNat(ta, tb) };
-    if (a.topRank != b.topRank) { return cmpNat(a.topRank, b.topRank) };
-    cmpNat(a.length, b.length);
+    if (ta != tb) { return Util.cmpNat(ta, tb) };
+    if (a.topRank != b.topRank) { return Util.cmpNat(a.topRank, b.topRank) };
+    Util.cmpNat(a.length, b.length);
   };
 
   public func pairEquivalents(components : [Component]) : Nat {
@@ -122,11 +102,11 @@ module {
       };
       k += 1;
     };
-    sortBy<PairInfo>(
+    Util.sortBy<PairInfo>(
       infos.toArray(),
       func(a, b) {
-        let c = cmpNat(a.rv, b.rv);
-        if (c != 0) { c } else { cmpNat(a.keyId, b.keyId) };
+        let c = Util.cmpNat(a.rv, b.rv);
+        if (c != 0) { c } else { Util.cmpNat(a.keyId, b.keyId) };
       },
     );
   };
@@ -307,14 +287,14 @@ module {
 
     // Most-constrained demands first: tractors (longest first), then pairs,
     // then singles. Stable ordering by original component index.
-    let order = sortBy<Nat>(
+    let order = Util.sortBy<Nat>(
       Array.tabulate<Nat>(components.size(), func i = i),
       func(a, b) {
         let pa = componentStrength(components[a].kind);
         let pb = componentStrength(components[b].kind);
-        if (pa != pb) { return cmpNat(pb, pa) }; // stronger first
+        if (pa != pb) { return Util.cmpNat(pb, pa) }; // stronger first
         if (isTractor(components[a]) and isTractor(components[b])) {
-          return cmpNat(components[b].length, components[a].length); // longer first
+          return Util.cmpNat(components[b].length, components[a].length); // longer first
         };
         0;
       },
@@ -331,11 +311,11 @@ module {
         k += 1;
       };
       // highest rank first, ties by ascending key
-      sortBy<Nat>(
+      Util.sortBy<Nat>(
         ks.toArray(),
         func(a, b) {
-          let c = cmpNat(rvOf[b], rvOf[a]);
-          if (c != 0) { c } else { cmpNat(a, b) };
+          let c = Util.cmpNat(rvOf[b], rvOf[a]);
+          if (c != 0) { c } else { Util.cmpNat(a, b) };
         },
       );
     };
@@ -358,7 +338,7 @@ module {
             };
             k += 1;
           };
-          let baseArr = sortBy<Nat>(bases.toArray(), func(a, b) { cmpNat(b, a) });
+          let baseArr = Util.sortBy<Nat>(bases.toArray(), func(a, b) { Util.cmpNat(b, a) });
           for (base in baseArr.vals()) {
             let picks = VarArray.repeat<Nat>(0, L);
             func step(j : Nat) : Bool {

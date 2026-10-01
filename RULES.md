@@ -68,6 +68,9 @@ parentheses for reference. Card notation: `S`=♠, `H`=♥, `C`=♣, `D`=♦,
   **buries exactly 8 cards** face down. Those buried cards are the kitty for
   scoring.
 - The banker leads the first trick.
+- Cards are dealt one card at a time, starting with the seat **after the
+dealer** and rotating clockwise. The dealer is a distinct, rotating role from
+the banker: it only fixes where dealing begins (see §11).
 
 ## 6. Declarations (亮主)
 
@@ -105,10 +108,13 @@ The lead is one combination; all its cards must belong to one logical suit.
   - A component can only be beaten by the **same type** — a higher single never
     beats a pair, and so on.
 - **Throw penalty**: an illegal throw is not rejected. The engine plays the
-  first beatable component (single, then pair, then tractor), returns the rest
-  to the leader's hand, and that component stands as the lead. If no specific
-  component can be isolated, the engine plays the smallest card(s): a pair if
-  the smallest face has two copies, otherwise a single.
+  first beatable component, returns the rest to the leader's hand, and that
+  component stands as the lead. Components are tried by type
+  (**single → pair → tractor**) and, within a type, from the **lowest rank
+  upward**, so the choice does not depend on the order the leader listed the
+  cards. If no specific component can be isolated, the engine plays the
+  smallest card(s): a pair if the smallest face has two copies, otherwise a
+  single.
 
 ## 8. Following (跟牌)
 
@@ -123,7 +129,10 @@ Every other player plays exactly `N` cards, where `N` is the lead's card count.
   **tractor slots > pair slots > single slots**, maximizing the number of
   complete pairs/tractors:
   - **Tractor slot**: play a same-suit tractor (of the lead's length if you
-    have one; otherwise your longest), then same-suit pairs, then singles.
+    have one; otherwise your longest), then same-suit pairs, then singles. A
+    single hand tractor may cover more than one tractor slot, but it is played
+    whole: you must preserve your longest tractor rather than split it to fill
+    slots separately.
   - **Pair slot**: play a same-suit pair if you hold one.
   - **Single slot**: play same-suit singles. A same-suit pair or tractor may be
     broken into singles **only** when no pair or tractor slot still needs it.
@@ -152,7 +161,9 @@ Candidates are decided by the lead's logical suit and structure.
 - If the lead is trump, only same-suit trump plays compete.
 - If the lead is a side suit:
   - valid ruffs beat every same-suit play;
-  - for a **throw** lead, if no valid ruff exists the leader wins;
+  - for a **throw** lead, if no valid ruff exists the leader wins; a
+    same-suit follow cannot beat a legal throw (unbeatability was checked when
+    it was led);
   - otherwise the highest valid ruff wins; if there is none, the highest
     same-suit play wins.
 - **Comparison**: compare components from strongest to weakest. Component
@@ -222,3 +233,14 @@ Let `P` be the attacking team's points (trick points plus any kitty scoop).
 | kitty (底牌) | the 8 buried cards |
 | scoop (抠底) | attackers win the final trick and score the kitty |
 | trick (一墩) | one round of four plays |
+
+## 14. Leaving and disconnects
+
+- A seat may leave at any time. A seat that leaves **mid-deal does not void the
+deal**: the remaining players play it out and the deal is scored normally, with
+the empty seat auto-played by the server. Leaving therefore cannot be used to
+avoid a loss, a bad trump, or an epoch.
+- The vacated seat is reopened for a new player in the lobby, or at the
+end-of-deal summary (the `Scoring` phase) before the next deal.
+- Hands and the deal's hidden information stay hidden throughout; a player who
+rejoins takes over the seat's remaining hand.

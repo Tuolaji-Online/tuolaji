@@ -1,4 +1,4 @@
-/// Scoring, kitty multiplier, and level progression (RULES.md §4).
+/// Scoring, kitty multiplier, and level progression (RULES.md §10).
 ///
 /// `compute` and `kittyMultiplier` are ported from `simulator.js`
 /// (`computeResult` / `kittyMultiplier`). Level progression awards the full

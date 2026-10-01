@@ -2,11 +2,10 @@
 ///
 /// Ported from `simulator.js`: isLegalThrow and checkLeadPlay.
 import Array "mo:core/Array";
-import List "mo:core/List";
-import VarArray "mo:core/VarArray";
 import Card "Card";
 import Combo "Combo";
 import Types "Types";
+import Util "Util";
 
 module {
   public type ThrowCheck = {
@@ -21,48 +20,34 @@ module {
     #Penalty : { forced : [Card.Card]; returned : [Card.Card] };
   };
 
-  func containsCard(hand : [Card.Card], c : Card.Card) : Bool {
-    var found = false;
-    for (x in hand.vals()) { if (x == c) { found := true } };
-    found;
-  };
-
-  func hasDuplicate(play : [Card.Card]) : Bool {
-    var i = 0;
-    while (i < play.size()) {
-      var j = i + 1;
-      while (j < play.size()) {
-        if (play[i] == play[j]) { return true };
-        j += 1;
-      };
-      i += 1;
-    };
-    false;
-  };
-
-  /// Multiset difference `play - remove`, preserving `play` order.
-  func difference(play : [Card.Card], remove : [Card.Card]) : [Card.Card] {
-    let used = VarArray.repeat(false, remove.size());
-    let out = List.empty<Card.Card>();
+  /// The smallest face in `play`: both copies when the lowest-rank card has a
+  /// pair in the play (same physical suit), otherwise the single lowest card.
+  /// This is the RULES §7 fallback when no beatable component can be isolated.
+  func smallestFace(play : [Card.Card], game : Card.Game) : [Card.Card] {
+    var best : ?Card.Card = null;
     for (c in play.vals()) {
-      var removed = false;
-      var i = 0;
-      while (i < remove.size()) {
-        if (not used[i] and remove[i] == c) {
-          used[i] := true;
-          removed := true;
-          i := remove.size(); // stop
-        } else {
-          i += 1;
+      switch (best) {
+        case null { best := ?c };
+        case (?b) {
+          let rc = Card.rankValue(c, game);
+          let rb = Card.rankValue(b, game);
+          if (rc < rb or (rc == rb and Card.pairKeyId(c) < Card.pairKeyId(b))) { best := ?c };
         };
       };
-      if (not removed) { out.add(c) };
     };
-    out.toArray();
+    switch (best) {
+      case null { [] };
+      case (?b) {
+        let k = Card.pairKeyId(b);
+        let pair = Array.filter<Card.Card>(play, func(c) = Card.pairKeyId(c) == k);
+        if (pair.size() >= 2) { [pair[0], pair[1]] } else { [b] };
+      };
+    };
   };
 
   /// Is this lead throwable (R4)? Non-throws are always legal. Returns the
-  /// first beatable component (in single → pair → tractor order) as `penalty`.
+  /// first beatable component (in single → pair → tractor order, and within a
+  /// kind the lowest rank first) as `penalty`.
   public func isLegalThrow(
     cards : [Card.Card],
     game : Card.Game,
@@ -74,7 +59,14 @@ module {
         if (lead.kind != #Throw) {
           { legal = true; lead = ?lead; penalty = [] };
         } else {
-          let singles = Array.filter<Combo.Component>(lead.components, Combo.isSingle);
+          let singles = Util.sortBy<Combo.Component>(
+            Array.filter<Combo.Component>(lead.components, Combo.isSingle),
+            func(a, b) {
+              if (a.topRank != b.topRank) { Util.cmpNat(a.topRank, b.topRank) } else {
+                Util.cmpNat(Card.pairKeyId(a.cards[0]), Card.pairKeyId(b.cards[0]));
+              };
+            },
+          );
           let pairs = Array.filter<Combo.Component>(lead.components, Combo.isPair);
           let tractors = Array.filter<Combo.Component>(lead.components, Combo.isTractor);
           let ordered = Array.concat<Combo.Component>(
@@ -125,11 +117,11 @@ module {
   ) : LeadCheck {
     // R1: ownership.
     for (c in play.vals()) {
-      if (not containsCard(hand, c)) {
+      if (not Card.contains(hand, c)) {
         return #Reject({ code = #CardNotInHand; detail = "card not in hand" });
       };
     };
-    if (hasDuplicate(play)) {
+    if (Card.hasDuplicate(play)) {
       return #Reject({ code = #DuplicateCard; detail = "duplicate cards in play" });
     };
     if (play.size() == 0) {
@@ -152,8 +144,10 @@ module {
         // R4: throw unbeatability (auto-penalty on failure).
         let tc = isLegalThrow(play, game, otherPlayerHands);
         if (tc.legal) { return #Ok(lead) };
-        let forced = tc.penalty;
-        let returned = difference(play, forced);
+        // §7: if no specific component can be isolated, fall back to the
+        // smallest face (a pair if the smallest face has two copies).
+        let forced = if (tc.penalty.size() == 0) { smallestFace(play, game) } else { tc.penalty };
+        let returned = Card.difference(play, forced);
         #Penalty({ forced; returned });
       };
     };

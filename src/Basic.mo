@@ -4,8 +4,7 @@
 /// seats and timeout auto-play: leads are always the lowest single card, and
 /// follows are constructed to satisfy the structural rules the server enforces
 /// (`Follow.checkPlay`) while preferring the lowest cards. Declarations and
-/// buries are the simplest legal choices. The fuller `Auto.mo` (used by the
-/// standalone `bot` canister and the reference strategy) is kept separate.
+/// buries are the simplest legal choices.
 import Array "mo:core/Array";
 import List "mo:core/List";
 import Nat "mo:core/Nat";
@@ -13,6 +12,7 @@ import VarArray "mo:core/VarArray";
 import Card "Card";
 import Combo "Combo";
 import Trick "Trick";
+import Util "Util";
 
 module {
   /// Void-table slot count: four side suits plus trump.
@@ -48,43 +48,18 @@ module {
 
   // ── generic helpers ────────────────────────────────────────────────
 
-  /// Multiset difference `hand - remove`, preserving `hand` order.
-  func removeAll(hand : [Card.Card], remove : [Card.Card]) : [Card.Card] {
-    let used = VarArray.repeat(false, remove.size());
-    let out = List.empty<Card.Card>();
-    for (c in hand.vals()) {
-      var removed = false;
-      var i = 0;
-      while (i < remove.size() and not removed) {
-        if (not used[i] and remove[i] == c) { used[i] := true; removed := true };
-        i += 1;
-      };
-      if (not removed) { out.add(c) };
-    };
-    out.toArray();
-  };
-
-  func lessMagnitude(a : Card.Card, b : Card.Card, game : Card.Game) : Bool {
+  /// Ascending magnitude: non-trump first, then rank.
+  func magnitudeCmp(a : Card.Card, b : Card.Card, game : Card.Game) : Int {
     let ta = if (Card.isTrump(a, game)) { 1 } else { 0 };
     let tb = if (Card.isTrump(b, game)) { 1 } else { 0 };
-    if (ta != tb) { ta < tb } else { Card.rankValue(a, game) < Card.rankValue(b, game) };
+    if (ta != tb) { Util.cmpNat(ta, tb) } else {
+      Util.cmpNat(Card.rankValue(a, game), Card.rankValue(b, game));
+    };
   };
 
   /// Sort ascending by (non-trump first, then rank).
   func sortByMagnitude(cards : [Card.Card], game : Card.Game) : [Card.Card] {
-    let out = Array.toVarArray<Card.Card>(cards);
-    var i = 1;
-    while (i < out.size()) {
-      let key = out[i];
-      var j = i;
-      while (j > 0 and lessMagnitude(key, out[j - 1], game)) {
-        out[j] := out[j - 1];
-        j -= 1;
-      };
-      out[j] := key;
-      i += 1;
-    };
-    VarArray.toArray<Card.Card>(out);
+    Util.sortBy<Card.Card>(cards, func(a, b) = magnitudeCmp(a, b, game));
   };
 
   /// The `count` lowest cards, optionally excluding one logical category.
@@ -132,8 +107,7 @@ module {
   // ── lead ───────────────────────────────────────────────────────────
 
   /// Lead the single lowest card in hand. Any single is a legal lead. The
-  /// played pile, void table and seat are accepted for API parity with
-  /// `Auto.leadingMove` and ignored.
+  /// played pile, void table and seat are accepted and ignored.
   public func leadingMove(
     hand : [Card.Card],
     _played : [Nat],
@@ -155,7 +129,7 @@ module {
     };
     let need = if (handCat.size() < 2) { handCat.size() } else { 2 };
     let sel = lowestCards(handCat, need, game, null);
-    let remaining = removeAll(hand, sel);
+    let remaining = Card.difference(hand, sel);
     let fill = lowestCards(remaining, Nat.sub(2, need), game, ?cat);
     Array.concat(sel, fill);
   };
@@ -191,7 +165,7 @@ module {
     let handPairs = Combo.getPairs(handCat, cat, game);
     let required = if (handPairs.size() < len) { handPairs.size() } else { len };
     var pairsSelected = longestLen;
-    let remainingPairs = Combo.getPairs(removeAll(handCat, sel), cat, game);
+    let remainingPairs = Combo.getPairs(Card.difference(handCat, sel), cat, game);
     var i = 0;
     while (pairsSelected < required and i < remainingPairs.size()) {
       sel := Array.concat(sel, remainingPairs[i].cards);
@@ -200,7 +174,7 @@ module {
     };
 
     // Fill with same-category singles up to min(H, N).
-    let remainingCat = sortByMagnitude(removeAll(handCat, sel), game);
+    let remainingCat = sortByMagnitude(Card.difference(handCat, sel), game);
     var catSelected = countCategory(sel, cat, game);
     var j = 0;
     while (catSelected < need and j < remainingCat.size()) {
@@ -211,7 +185,7 @@ module {
 
     // Sluff the rest from the lowest non-category cards.
     let fillCount = Nat.sub(N, sel.size());
-    let fill = lowestCards(removeAll(hand, sel), fillCount, game, ?cat);
+    let fill = lowestCards(Card.difference(hand, sel), fillCount, game, ?cat);
     Array.concat(sel, fill);
   };
 
@@ -307,8 +281,7 @@ module {
   };
 
   /// Choose a legal follow for `lead`, preferring the lowest cards. The played
-  /// pile, void table, trick and seat are accepted for API parity with
-  /// `Auto.followMove` and ignored.
+  /// pile, void table, trick and seat are accepted and ignored.
   public func followMove(
     hand : [Card.Card],
     _played : [Nat],
@@ -343,8 +316,7 @@ module {
   /// The simplest legal declaration: a big-joker pair, else a small-joker
   /// pair, else a level-card pair in any suit, else a single level card. Null
   /// means no call (the deal then defaults to No-Trump). The current declarer
-  /// and own seat are accepted for API parity with `Auto.declareMoveCtx` and
-  /// ignored.
+  /// and own seat are accepted for and ignored.
   public func declareMoveCtx(
     hand : [Card.Card],
     game : Card.Game,
@@ -376,8 +348,32 @@ module {
 
   // ── bury ───────────────────────────────────────────────────────────
 
-  /// The banker's simplest bury: the 8 lowest cards, non-trumps first.
+  /// The banker's simplest bury: the 8 least valuable cards, preferring
+  /// 0-point cards over point cards (5/10/K) and non-trumps over trumps, so a
+  /// timeout does not hand the attackers points in the kitty.
   public func buryMove(hand : [Card.Card], game : Card.Game) : [Card.Card] {
-    lowestCards(hand, 8, game, null);
+    let out = Array.toVarArray<Card.Card>(hand);
+    func after(a : Card.Card, b : Card.Card) : Bool {
+      let pa = Card.pointValue(a) > 0;
+      let pb = Card.pointValue(b) > 0;
+      if (pa != pb) { return pa }; // point cards sort last
+      let ta = Card.isTrump(a, game);
+      let tb = Card.isTrump(b, game);
+      if (ta != tb) { return ta }; // trumps sort last
+      Card.rankValue(a, game) > Card.rankValue(b, game);
+    };
+    var i = 1;
+    while (i < out.size()) {
+      let key = out[i];
+      var j = i;
+      while (j > 0 and after(out[j - 1], key)) {
+        out[j] := out[j - 1];
+        j -= 1;
+      };
+      out[j] := key;
+      i += 1;
+    };
+    let n = if (out.size() < 8) { out.size() } else { 8 };
+    Array.tabulate<Card.Card>(n, func(k) = out[k]);
   };
 }
