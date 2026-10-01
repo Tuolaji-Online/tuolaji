@@ -1,11 +1,15 @@
 name: ci
 
-# Build the canister artifacts and publish them on a tag push.
+# Test on pull requests and pushes to main; build and publish the canister
+# artifacts only on a tag push (gated on the test job).
 # Linux (Ubuntu) only: the released `vessel-linux64` binary is used.
 on:
   push:
+    branches:
+      - main
     tags:
       - '*'
+  pull_request:
 
 permissions:
   contents: write
@@ -14,8 +18,7 @@ env:
   VESSEL_VERSION: v0.8.0
 
 jobs:
-  build:
-    # Linux only — no other platforms are built or released.
+  test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -37,6 +40,27 @@ jobs:
         run: |
           PKGS="$(vessel sources)"
           moc -r $PKGS test/Run.mo
+
+  build:
+    # Tag pushes only — no other refs are built or released.
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install vessel
+        run: |
+          curl -fsSL -o /usr/local/bin/vessel \
+            "https://github.com/caffeinelabs/vessel/releases/download/${VESSEL_VERSION}/vessel-linux64"
+          chmod +x /usr/local/bin/vessel
+          vessel --version
+
+      - name: Install the Motoko compiler and packages
+        run: |
+          vessel bin
+          vessel install
+          echo "$PWD/$(vessel bin)" >> "$GITHUB_PATH"
 
       - name: Build tuolaji.wasm and tuolaji.did
         run: |
