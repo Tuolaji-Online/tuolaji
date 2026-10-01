@@ -1,0 +1,25 @@
+name: Setup Motoko
+description: Install vessel and the Motoko compiler packages.
+
+inputs:
+  vessel-version:
+    description: vessel release version to install
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Install vessel
+      shell: bash
+      run: |
+        curl -fsSL -o /usr/local/bin/vessel \
+          "https://github.com/caffeinelabs/vessel/releases/download/${{ inputs.vessel-version }}/vessel-linux64"
+        chmod +x /usr/local/bin/vessel
+        vessel --version
+
+    - name: Install the Motoko compiler and packages
+      shell: bash
+      run: |
+        vessel bin
+        vessel install
+        echo "$PWD/$(vessel bin)" >> "$GITHUB_PATH"
