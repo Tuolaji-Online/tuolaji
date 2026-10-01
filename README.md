@@ -153,10 +153,9 @@ Contributions are welcome — code, rules, tests, translations, and docs.
 
 **Ways to help**
 
-- **Report bugs and rules disagreements** by opening an
-  [issue](https://github.com/ninegua/tuolaji/issues). If it happened at a
-  table, use the in-app problem-report button so the report is attached to the
-  exact table and deal.
+- **Report bugs and rules disagreements** by opening an [issue](../../issues).
+  If it happened at a table, use the in-app problem-report button so the report
+  is attached to the exact table and deal.
 - **Improve the rules.** [`RULES.md`](./RULES.md) aims to be the definitive
   standard for this game, written in English.
   If the engine and the docs disagree, that is a bug — please say which you
