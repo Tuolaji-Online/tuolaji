@@ -1,0 +1,31 @@
+/// Entry point for the pure `moc -r` unit/golden suite.
+import CardTest "CardTest";
+import ClientTest "ClientTest";
+import ComboTest "ComboTest";
+import ConcurrencyTest "ConcurrencyTest";
+import DealTest "DealTest";
+import BasicTest "BasicTest";
+import LeadTest "LeadTest";
+import FollowTest "FollowTest";
+import TrickTest "TrickTest";
+import ScoringTest "ScoringTest";
+import SchedulerTest "SchedulerTest";
+import TrumpTest "TrumpTest";
+import TableTest "TableTest";
+import Test "Test";
+
+let t = Test.Harness();
+CardTest.run(t);
+ClientTest.run(t);
+ComboTest.run(t);
+ConcurrencyTest.run(t);
+DealTest.run(t);
+BasicTest.run(t);
+LeadTest.run(t);
+FollowTest.run(t);
+TrickTest.run(t);
+ScoringTest.run(t);
+SchedulerTest.run(t);
+TrumpTest.run(t);
+TableTest.run(t);
+t.summary();

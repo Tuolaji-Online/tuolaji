@@ -33,6 +33,11 @@ jobs:
           vessel install
           echo "$PWD/$(vessel bin)" >> "$GITHUB_PATH"
 
+      - name: Run the pure Motoko test suite
+        run: |
+          PKGS="$(vessel sources)"
+          moc -r $PKGS test/Run.mo
+
       - name: Build tuolaji.wasm and tuolaji.did
         run: |
           PKGS="$(vessel sources)"
