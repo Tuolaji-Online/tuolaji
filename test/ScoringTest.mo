@@ -57,5 +57,12 @@ module {
     t.equalNat(Scoring.advanceLevel(9, Scoring.compute(200)), 12, "attacker 9 +3 -> Q");
     t.equalNat(Scoring.advanceLevel(12, Scoring.compute(200)), 14, "13/14 capped at A");
     t.equalNat(Scoring.advanceLevel(9, Scoring.compute(50)), 10, "banker 9 +1 -> 10");
+
+    // epoch wrap: the gained levels continue past A around the 2..A ladder
+    t.equalNat(Scoring.nextEpochLevel(14, 1), 2, "A +1 wraps to 2");
+    t.equalNat(Scoring.nextEpochLevel(14, 2), 3, "A +2 wraps to 3");
+    t.equalNat(Scoring.nextEpochLevel(14, 3), 4, "A +3 wraps to 4");
+    t.equalNat(Scoring.nextEpochLevel(14, 13), 14, "a full ladder returns to A");
+    t.equalNat(Scoring.nextEpochLevel(3, 1), 4, "a lower target wraps the same way");
   };
 }

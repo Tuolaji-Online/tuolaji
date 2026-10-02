@@ -206,9 +206,9 @@ Let `P` be the attacking team's points (trick points plus any kitty scoop).
 - The target level is **A**.
 - A partnership completes an **epoch** when it wins a deal as the banking team
   while that deal was played at level A.
-- On completion, that partnership's epoch count increases and its level resets
-  to `2 + the levels it would have gained` (capped at A). The other partnership
-  keeps its own epoch and level.
+- On completion, that partnership's epoch count increases and its level wraps
+  past A by the levels it would have gained (so +1 restarts at 2, +2 at 3, and
+  +3 at 4). The other partnership keeps its own epoch and level.
 - Completing an epoch is reported but does **not** end the table; play
   continues until the players leave.
 

@@ -42,6 +42,9 @@ module {
     clientId : ?ClientId;
     client : ?ClientSub;
     takenAt : Seq;
+    // A canister-held seat a human may take over. Set when the bot attaches;
+    // false for human-run seats.
+    replaceable : Bool;
   };
 
   /// The events a client has not seen, plus a flag telling it to fetch an
@@ -167,6 +170,10 @@ module {
     // True once the seat has an owner (a claimed canister seat counts as
     // connected before it attaches a push client).
     connected : Bool;
+    // Whether a canister-held seat may be taken over by a human. The single
+    // source of truth for the lobby and table hints; false for empty/human
+    // seats.
+    replaceable : Bool;
   };
 
   /// A principal that has taken a seat at the table (whether or not it still
@@ -192,6 +199,10 @@ module {
     level : Level;
     dealNo : Nat;
     epoch : Nat;
+    // Server time by which the table is idle and should be treated as ended.
+    // Every event extends it, so a client can decide locally that the table is
+    // over once its own clock passes this value.
+    endingTime : Timestamp;
     joinable : Bool;
     // The prospective banker (declarer, else the rotating dealer) once a bank
     // is decided, so the lobby can mark the seat before the deal starts. Null
@@ -391,6 +402,9 @@ module {
     tableId : TableId;
     dealNo : Nat;
     epoch : Nat;
+    // Server time by which the table is idle and should be treated as ended;
+    // see `TableInfo.endingTime`.
+    endingTime : Timestamp;
     phase : Phase;
     level : Level;
     trump : ?Suit;
@@ -529,6 +543,9 @@ module {
     seat : Seat;
     avatar : ?Avatar;
     clientId : ?ClientId;
+    // Canister-only hint: whether the attached seat may later be taken over by
+    // a human. Omitted by human clients (defaults to false).
+    replaceable : ?Bool;
   };
 
   public type ReadyRequest = {

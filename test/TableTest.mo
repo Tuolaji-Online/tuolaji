@@ -271,17 +271,18 @@ module {
     t.check(Table.seatOf(st4, ps[4]) == ?1, "the vacated seat is claimed for the target");
     t.check(Table.seatOf(st4, ps[1]) == null, "the leaver no longer holds the seat");
     t.check(isErr(Table.joinTable(st4, ps[2], 1, 2), #LobbyFull), "another principal is rejected");
-    t.check(isOk(Table.joinTableWithClient(st4, ps[4], ?"\04", 1, null, 2)), "the claimed principal attaches mid-deal");
+    t.check(isOk(Table.joinTableWithClient(st4, ps[4], ?"\04", 1, null, null, 2)), "the claimed principal attaches mid-deal");
   };
 
   // ── scheduler: derived next wake time ──────────────────────────────
 
   func testNextTimer(t : Test.Harness, ps : [Principal]) {
     t.suite("M2 next timer");
-    // An idle lobby table has no time-critical work, so it schedules nothing:
-    // pruning and eviction are lazy and must not arm a timer.
+    // An idle table has no time-critical work, so it schedules nothing: the
+    // idle deadline is a stored value (`endingTime`) the clients compare
+    // against, not a timer.
     let st = fresh(ps);
-    t.check(Table.nextTimer(st, 0) == null, "an idle lobby table schedules no wake");
+    t.check(Table.nextTimer(st, 0) == null, "an idle table schedules no wake");
 
     // Game deadlines still wake the scheduler.
     st.phase := #Burying;
@@ -317,13 +318,18 @@ module {
     );
     t.check(Table.seatOf(st, ps[4]) == null, "the rejected join takes no seat");
     t.check(
-      isOk(Table.joinTableWithClient(st, ps[1], ?"\01", 1, null, 0)),
+      isOk(Table.joinTableWithClient(st, ps[1], ?"\01", 1, null, null, 0)),
       "the claimed principal attaches with its client id",
     );
     t.check(not Table.hasClient(st, ps[1], ?"\01"), "Table.addClient is what attaches the push client");
     Table.addClient(st, ps[1], ?"\01", 1);
     t.check(Table.hasClient(st, ps[1], ?"\01"), "addClient attaches the claimed seat's push client");
     t.equalNat(Table.clientsOf(st).size(), 1, "the attached seat is a push target");
+    // The join hint records whether the seat may be taken over, and `SeatInfo`
+    // exposes it — the single source of truth the lobby and table read.
+    t.check(not Table.info(st).seats[1].replaceable, "a plain join is not replaceable");
+    ignore Table.joinTableWithClient(st, ps[2], ?"\02", 2, null, ?true, 0);
+    t.check(Table.info(st).seats[2].replaceable, "a replaceable join hint is exposed");
 
     // Handing a seat over transfers ownership in place; the deal keeps playing
     // and the seat never empties.
@@ -355,7 +361,7 @@ module {
     };
     t.equalNat(joinsBefore, 0, "the hand-over does not announce the target");
     t.check(
-      isOk(Table.joinTableWithClient(st2, ps[4], ?"\05", 1, null, 0)),
+      isOk(Table.joinTableWithClient(st2, ps[4], ?"\05", 1, null, null, 0)),
       "the target attaches to the claimed seat",
     );
     t.check(
@@ -465,17 +471,25 @@ module {
     t.check(List.size(st2.log) == 0, "the log is empty after pruning");
     t.check(Table.isIdle(st2, idleAt * 2), "an empty log is idle");
 
-    // A silent human-wait phase is not "over": it has no timer and is waiting
-    // on a player. A silent timer-driven phase is stale and counts as over.
+    // Reaching the idle deadline is "over" in every phase: the stored
+    // `endingTime` is the single truth the lobby and the clients agree on.
     let st3 = fresh(ps);
     Table.debugForce(st3, #Lobby, null, 0);
     t.check(Table.isIdle(st3, idleAt + 1), "a lobby table can be idle");
-    t.check(not Table.isOver(st3, idleAt + 1), "an idle lobby table is not over");
+    t.check(Table.isOver(st3, idleAt + 1), "an idle lobby table is over");
     Table.debugForce(st3, #Scoring, null, 0);
     t.check(Table.isIdle(st3, idleAt + 1), "a scoring table can be idle");
-    t.check(not Table.isOver(st3, idleAt + 1), "an idle scoring table is not over");
+    t.check(Table.isOver(st3, idleAt + 1), "an idle scoring table is over");
     Table.debugForce(st3, #Playing, null, 0);
     t.check(Table.isOver(st3, idleAt + 1), "an idle playing table is over");
+
+    // Any event pushes the idle deadline out.
+    let st4 = fresh(ps);
+    ignore Table.ready(st4, ps[0], 12345);
+    t.check(
+      st4.endingTime == 12345 + Table.IDLE_RETENTION_NANOS,
+      "an event extends endingTime",
+    );
   };
 
   func testConfig(t : Test.Harness) {

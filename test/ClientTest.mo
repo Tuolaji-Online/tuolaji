@@ -22,7 +22,7 @@ module {
   /// other principals, readied into `#Dealing` and dealt one card each.
   func dealt(p : Principal, others : [Principal], id0 : Types.ClientId, id1 : Types.ClientId) : Table.State {
     let st = Table.newWithClient(0, Types.defaultConfig, p, ?id0, 0, null);
-    ignore Table.joinTableWithClient(st, p, ?id1, 1, null, 0);
+    ignore Table.joinTableWithClient(st, p, ?id1, 1, null, null, 0);
     ignore Table.joinTable(st, others[0], 2, 0);
     ignore Table.joinTable(st, others[1], 3, 0);
     ignore Table.readyWithClient(st, p, ?id0, 0);
@@ -77,7 +77,7 @@ module {
     t.check(Table.seatOf(st, p) == ?0, "principal-only lookup returns the first seat");
     t.check(Table.principalHasSeat(st, p), "the principal is seated");
     // The same (principal, clientId) cannot take two seats.
-    switch (Table.joinTableWithClient(st, p, ?id0, 2, null, 0)) {
+    switch (Table.joinTableWithClient(st, p, ?id0, 2, null, null, 0)) {
       case (#err(e)) { t.check(e.code == #AlreadyJoined, "re-joining with the same id is AlreadyJoined") };
       case (#ok(_)) { t.check(false, "re-joining with the same id is AlreadyJoined") };
     };
@@ -159,7 +159,7 @@ module {
     // over: seat 2 moves from others[0] to p, and p attaching under a new
     // client id must not see the old owner's dealt cards.
     ignore Table.leaveWithClient(st, others[0], null, ?p, 0);
-    switch (Table.joinTableWithClient(st, p, ?"\02", 2, null, 0)) {
+    switch (Table.joinTableWithClient(st, p, ?"\02", 2, null, null, 0)) {
       case (#ok(_)) {};
       case (#err(_)) { t.check(false, "p attaches to the vacated seat") };
     };

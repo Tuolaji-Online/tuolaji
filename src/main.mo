@@ -506,10 +506,10 @@ persistent actor {
               case (?p) { if (p == #Ended) { info.phase == p or over } else { info.phase == p } };
               case null { true };
             };
-            // A table silent for the idle window is over for practical
-            // purposes: the live lists drop it, but the ended listing keeps it
-            // (it is still swept to Ended by the next ingress). Human-wait
-            // phases (#Lobby, #Scoring) are exempt — see `Table.isOver`.
+            // A table past its idle deadline (`endingTime`) is over for
+            // practical purposes: the live lists drop it, but the ended
+            // listing keeps it (it is still swept to `Ended` by the next
+            // ingress).
             let live = not Table.isIdle(s, now);
             // An ended table is only listed when it has a report to open: a
             // pruned log or no completed trick leaves nothing to show.
@@ -658,7 +658,7 @@ persistent actor {
             return #err({ seq = Table.seqOf(s); code = #NotWhitelisted; detail = "principal already seated in this table" });
           };
         };
-        let r = Table.joinTableWithClient(s, msg.caller, req.clientId, req.seat, req.avatar, now);
+        let r = Table.joinTableWithClient(s, msg.caller, req.clientId, req.seat, req.avatar, req.replaceable, now);
         switch (r) {
           case (#ok(_)) {
             if (Access.isCanister(msg.caller)) {
@@ -844,6 +844,7 @@ persistent actor {
       tableId = id;
       dealNo = 0;
       epoch = 1;
+      endingTime = 0;
       phase = #Ended;
       level = 2;
       trump = null;

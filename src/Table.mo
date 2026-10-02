@@ -108,6 +108,11 @@ module {
     var voids : [Bool];
     var kittyRevealed : Bool;
     var startedAt : Types.Timestamp;
+    // Server time by which the table is idle (no event since
+    // `endingTime - IDLE_RETENTION_NANOS`) and should be treated as ended.
+    // Extended to `now + IDLE_RETENTION_NANOS` on every event, so clients can
+    // decide locally that the table is over.
+    var endingTime : Types.Timestamp;
     var endedAt : ?Types.Timestamp;
     var lastTrick : ?Types.TrickRecord;
   };
@@ -394,7 +399,7 @@ module {
       switch (reserved[i]) {
         case (?p) {
           if (st.seats[i] == null) {
-            st.seats[i] := ?{ principal = p; clientId = null; client = null; takenAt = st.seq };
+            st.seats[i] := ?{ principal = p; clientId = null; client = null; takenAt = st.seq; replaceable = false };
           };
         };
         case null {};
@@ -406,6 +411,8 @@ module {
   func append(st : State, now : Types.Timestamp, body : Types.EventBody) : Types.Seq {
     st.seq += 1;
     st.log.add({ seq = st.seq; at = now; body });
+    // Any event is activity: push the idle deadline out.
+    st.endingTime := now + IDLE_RETENTION_NANOS;
     st.seq;
   };
 
@@ -415,6 +422,11 @@ module {
 
   func err(st : State, code : Types.ErrorCode, detail : Text) : Types.ActionResult {
     #err({ seq = st.seq; code; detail });
+  };
+
+  /// A join hint: an explicit replaceable flag, else false (a human seat).
+  func replaceableOf(b : ?Bool) : Bool {
+    switch (b) { case (?v) { v }; case null { false } };
   };
 
   func allReady(st : State) : Bool {
@@ -454,7 +466,7 @@ module {
       var seq = 0;
       var log = List.empty();
       var lowWater = 1;
-      var seats = [var ?{ principal = creator; clientId; client = null; takenAt = 0 }, null, null, null];
+      var seats = [var ?{ principal = creator; clientId; client = null; takenAt = 0; replaceable = false }, null, null, null];
       var avatars = [var avatar, null, null, null];
       var ready = [var false, false, false, false];
       var dealNo = 0;
@@ -490,6 +502,7 @@ module {
       var voids = Basic.emptyVoids();
       var kittyRevealed = false;
       var startedAt = now;
+      var endingTime = now + IDLE_RETENTION_NANOS;
       var endedAt = null;
       var lastTrick = null;
     };
@@ -509,7 +522,7 @@ module {
     seat : Types.Seat,
     now : Types.Timestamp,
   ) : Types.ActionResult {
-    joinTableWithClient(st, caller, null, seat, null, now);
+    joinTableWithClient(st, caller, null, seat, null, null, now);
   };
 
   /// Take a specific seat, storing the caller's avatar with it.
@@ -520,7 +533,7 @@ module {
     avatar : ?Types.Avatar,
     now : Types.Timestamp,
   ) : Types.ActionResult {
-    joinTableWithClient(st, caller, null, seat, avatar, now);
+    joinTableWithClient(st, caller, null, seat, avatar, null, now);
   };
 
   /// Client-id-aware join. Uniqueness is `(principal, clientId)`, so a canister
@@ -538,6 +551,7 @@ module {
     clientId : ?Types.ClientId,
     seat : Types.Seat,
     avatar : ?Types.Avatar,
+    replaceable : ?Bool,
     now : Types.Timestamp,
   ) : Types.ActionResult {
     if (seat >= 4) { return err(st, #NotASeat, "invalid seat") };
@@ -549,6 +563,10 @@ module {
         if (s == seat) {
           if (not validAvatar(avatar)) { return err(st, #InvalidAvatar, "invalid avatar") };
           st.avatars[s] := avatar;
+          switch (replaceable) {
+            case (?v) { switch (st.seats[s]) { case (?o) { st.seats[s] := ?{ o with replaceable = v } }; case null {} } };
+            case null {};
+          };
         };
         return err(st, #AlreadyJoined, "already seated");
       };
@@ -561,7 +579,7 @@ module {
         // An open seat can be taken in the lobby, or in `#Scoring` so a seat
         // that emptied mid-deal can be refilled before the next deal.
         if (st.phase != #Lobby and st.phase != #Scoring) { return err(st, #NotInLobby, "not in lobby") };
-        st.seats[seat] := ?{ principal = caller; clientId; client = null; takenAt = st.seq };
+        st.seats[seat] := ?{ principal = caller; clientId; client = null; takenAt = st.seq; replaceable = replaceableOf(replaceable) };
         st.ready[seat] := false;
         st.avatars[seat] := avatar;
         ignore append(st, now, #PlayerJoined({ seat; who = caller; avatar }));
@@ -576,7 +594,8 @@ module {
         switch (o.client) {
           case (?_) { return err(st, #LobbyFull, "seat taken") };
           case null {
-            st.seats[seat] := ?{ o with clientId; takenAt = st.seq };
+            let flag = switch (replaceable) { case (?v) { v }; case null { o.replaceable } };
+            st.seats[seat] := ?{ o with clientId; takenAt = st.seq; replaceable = flag };
             st.avatars[seat] := avatar;
             ignore append(st, now, #PlayerJoined({ seat; who = caller; avatar }));
             ok(st);
@@ -627,7 +646,7 @@ module {
             // preserved, so timeout auto-play covers the gap until `p`
             // attaches. Claiming before the empty check is what keeps a
             // hand-over from ending the table.
-            st.seats[s] := ?{ principal = p; clientId = null; client = null; takenAt = st.seq };
+            st.seats[s] := ?{ principal = p; clientId = null; client = null; takenAt = st.seq; replaceable = false };
             st.ready[s] := false;
           };
           case null {
@@ -705,25 +724,19 @@ module {
     };
   };
 
-  /// True when the table has emitted no event for `IDLE_RETENTION_NANOS` and
-  /// has not already ended. The event log is the clock: its last entry is the
-  /// most recent activity, and an empty log means everything aged out, which
-  /// (with pruning set far beyond the idle window) can only happen once the
-  /// table is long idle.
+  /// True when the table has reached its idle deadline (`endingTime`) and has
+  /// not already ended. `endingTime` is extended on every event, so this is a
+  /// stored value both the server and its clients can compare against.
   public func isIdle(st : State, now : Types.Timestamp) : Bool {
     if (st.phase == #Ended) { return false };
-    switch (st.log.last()) {
-      case (?e) { now - e.at > IDLE_RETENTION_NANOS };
-      case null { true };
-    };
+    now > st.endingTime;
   };
 
-  /// True when the lobby listing should treat the table as over: it has gone
-  /// idle and is in a phase that makes progress on its own. The human-wait
-  /// phases `#Lobby` and `#Scoring` are exempt: neither arms a timer, so
-  /// silence there is normal waiting on a player, not abandonment.
+  /// True when the lobby listing should treat the table as over: it has reached
+  /// its idle deadline. Used to bucket it with the ended tables; it is swept to
+  /// `#Ended` by the next registry change.
   public func isOver(st : State, now : Types.Timestamp) : Bool {
-    isIdle(st, now) and st.phase != #Lobby and st.phase != #Scoring;
+    isIdle(st, now);
   };
 
   /// End a table that has gone idle. Returns true when it was ended.
@@ -1325,9 +1338,9 @@ module {
     // The deal was played at the bankers' pre-deal level. Only winning *while
     // already at `targetLevel` completes the epoch; reaching A from K merely
     // queues the A deal. On completion only the winning partnership advances:
-    // its epoch increments and its level resets to 2 + the levels gained this
-    // deal (capped at A), so a 0-point hold at A starts the next epoch at 5.
-    // The other partnership keeps its own epoch and level.
+    // its epoch increments and its level wraps past A by the levels gained
+    // this deal, so a 0-point hold at A starts the next epoch at 4. The other
+    // partnership keeps its own epoch and level.
     let reachedTarget = outcome.winner == #Bankers and playedLevel >= st.cfg.targetLevel;
     ignore append(st, now, #DealScored({
       attackerPoints = st.attackerPoints;
@@ -1343,12 +1356,13 @@ module {
     st.dealer := nextDealer;
     if (reachedTarget) {
       // Only the winning partnership wraps: its epoch advances and its level
-      // carries one no-skip step into the new epoch (A -> 3). The other
-      // partnership keeps its own epoch and level untouched.
+      // continues from the played level by the gained levels, wrapping past A
+      // (A +1 -> 2, +2 -> 3, +3 -> 4). The other partnership keeps its own
+      // epoch and level untouched.
       let wt = bankTeamOf(st);
       let finishedEpoch = st.teamEpoch[wt];
       st.teamEpoch[wt] += 1;
-      st.teamLevel[wt] := Scoring.advanceLevel(2, outcome);
+      st.teamLevel[wt] := Scoring.nextEpochLevel(playedLevel, outcome.gain);
       st.level := st.teamLevel[wt];
       ignore append(st, now, #EpochEnded({ winner = outcome.winner; epoch = finishedEpoch }));
     };
@@ -1600,10 +1614,10 @@ module {
   /// it). A table contributes at most one wake — the earliest of the above —
   /// and `nextTimer` is re-derived after each callback.
   ///
-  /// Event-log pruning and ended-table eviction are deliberately *not* here:
-  /// they need no precise wake, so an idle lobby table schedules no timer at
-  /// all. `main` prunes lazily on ingress and sweeps ended tables on registry
-  /// changes instead.
+  /// Idleness is deliberately *not* here: it is stored in `endingTime` and
+  /// checked by `isIdle` on ingress; an idle table therefore schedules no timer
+  /// at all, and clients decide locally that it is over once their clock passes
+  /// `endingTime`. Event-log pruning and ended-table eviction are likewise lazy.
   public func nextTimer(st : State, now : Types.Timestamp) : ?Types.Timestamp {
     var next : ?Types.Timestamp = null;
     func consider(t : Types.Timestamp) {
@@ -1821,6 +1835,7 @@ module {
           ready = st.ready[i];
           handCount = st.hands[i].size();
           connected = st.seats[i] != null;
+          replaceable = switch (st.seats[i]) { case (?o) { o.replaceable }; case null { false } };
         };
       },
     );
@@ -1842,6 +1857,7 @@ module {
         case (?s) { st.teamEpoch[s % 2] };
         case null { st.teamEpoch[bankTeamOf(st)] };
       };
+      endingTime = st.endingTime;
       phase = st.phase;
       level = st.level;
       trump = st.trump;
@@ -1941,6 +1957,7 @@ module {
       // The next deal is played at the bank's level, so the bank's epoch is the
       // one the lobby should show.
       epoch = st.teamEpoch[bankTeamOf(st)];
+      endingTime = st.endingTime;
       // A truly empty seat makes a table joinable; in `#Scoring` the next
       // deal has not started, so a seat that emptied mid-deal can be refilled.
       joinable = (st.phase == #Lobby or st.phase == #Scoring) and hasEmptySeat(st);

@@ -64,4 +64,13 @@ module {
     let raw = currentLevel + outcome.gain;
     if (raw > MAX_LEVEL) { MAX_LEVEL } else { raw };
   };
+
+  /// The level a partnership restarts the next epoch at after winning a deal
+  /// played at `playedLevel`: the gained levels wrap around the 2..A ladder, so
+  /// a +1 hold at A restarts at 2, +2 at 3, and +3 at 4 (RULES.md §12).
+  public func nextEpochLevel(playedLevel : Nat, gain : Nat) : Nat {
+    // Levels run 2..A, so there are 13 rungs; `+ 11` is `- 2 (mod 13)`, which
+    // shifts into 0-based before wrapping and avoids a runtime Nat subtraction.
+    ((playedLevel + gain + 11) % 13) + 2;
+  };
 }

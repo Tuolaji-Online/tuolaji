@@ -46,10 +46,12 @@ rules live in pure modules that never touch the network — `Card`, `Combo`,
 timeout auto-play policy) and `Scheduler` (timer arming).
 
 One canister holds many tables, bounded by a global and a per-principal cap. The
-per-table event log is retained for `eventRetentionSeconds`. A table with no
-event for 10 minutes is idle: `listTables` hides it and the next
-`createTable`/`joinTable` ends it. Ended tables are kept for 2 days, then
-evicted.
+per-table event log is retained for `eventRetentionSeconds`. Each table stores
+an `endingTime` (server time) that every event pushes to `now + 10 minutes`; a
+table at or past it is idle and treated as ended. The lobby hides it and the
+next `createTable`/`joinTable` sweeps it to `Ended`, while clients compare their
+own clock against `endingTime` so a seated player is told the table is over
+without waiting for a sweep. Ended tables are kept for 2 days, then evicted.
 
 ## How clients talk to the canister
 
