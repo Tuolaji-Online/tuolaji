@@ -1,5 +1,6 @@
 /// Entry point for the pure `moc -r` unit/golden suite.
 import CardTest "CardTest";
+import ChaCha20Test "ChaCha20Test";
 import ClientTest "ClientTest";
 import ComboTest "ComboTest";
 import ConcurrencyTest "ConcurrencyTest";
@@ -16,6 +17,7 @@ import Test "Test";
 
 let t = Test.Harness();
 CardTest.run(t);
+ChaCha20Test.run(t);
 ClientTest.run(t);
 ComboTest.run(t);
 ConcurrencyTest.run(t);

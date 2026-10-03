@@ -18,6 +18,9 @@ import Scheduler "Scheduler";
 import Table "Table";
 import Types "Types";
 
+// The retired stable variables (the constants, `botPrincipals`, `sched`) are
+// `transient`; a one-time migration already dropped them from the deployed
+// signature, so no migration is needed here any more.
 persistent actor {
   // ── Reentrancy discipline ──────────────────────────────────────────
   // Every ingress reads and mutates its table synchronously. The only
@@ -27,15 +30,15 @@ persistent actor {
   // idempotent, so two racing triggers cannot install two decks.
 
   /// Cap on concurrently-seated tables per principal.
-  let MAX_TABLES_PER_PRINCIPAL : Nat = 8;
+  transient let MAX_TABLES_PER_PRINCIPAL : Nat = 8;
 
   /// Global cap so the scheduler's per-wake table count stays bounded.
-  let MAX_TABLES : Nat = 1000;
+  transient let MAX_TABLES : Nat = 1000;
 
   /// Ingress cycle floor for canister clients. A canister must
   /// attach at least `MIN_CALL_CYCLES` to every update, and that is the amount
   /// the canister accepts (no exact per-push cost).
-  let MIN_CALL_CYCLES : Nat = 2_000_000;
+  transient let MIN_CALL_CYCLES : Nat = 2_000_000;
 
   /// Whitelist of bot principals allowed to hold more than one seat in a
   /// single table. One seat per table is always allowed; a second
@@ -44,7 +47,7 @@ persistent actor {
   /// environment variable (icp-cli sets it automatically for every canister in
   /// the project), so no operator call is needed. `getBotPrincipals` exposes it
   /// for auditing.
-  let botPrincipals = Set.empty<Principal>();
+  transient let botPrincipals = Set.empty<Principal>();
 
   /// Seed the bot whitelist from the deploy environment. The variable holds the
   /// `bot` canister's principal text (set by the tooling, so trusted); it is
@@ -135,13 +138,13 @@ persistent actor {
   /// Player-filed problem reports, keyed by a monotonically increasing id.
   let reports = Map.empty<Types.ReportId, Types.Report>();
   var nextReportId : Types.ReportId = 0;
-  let MAX_REPORTS : Nat = 2000;
-  let MAX_REPORT_TEXT : Nat = 2000;
+  transient let MAX_REPORTS : Nat = 2000;
+  transient let MAX_REPORT_TEXT : Nat = 2000;
 
   /// One-off timer scheduler: each table queues its earliest
   /// deadline and only a single `Timer.setTimer` is armed at a time, so an
   /// idle canister is never woken.
-  let sched = Scheduler.new();
+  transient let sched = Scheduler.new();
 
   /// Recompute a table's single pending wake time from its current state.
   func reschedule(s : Table.State, now : Types.Timestamp) {
@@ -156,23 +159,14 @@ persistent actor {
     Scheduler.arm<system>(sched, now, fire);
   };
 
-  /// Number of independent `raw_rand` blobs concatenated into one deal's
-  /// entropy. One 32-byte blob is not enough for 108 Fisher–Yates draws; a
-  /// handful guarantees the draws come from real beacon entropy.
-  let ENTROPY_BLOBS : Nat = 8;
-
-  /// Fetch the beacon entropy for a pending shuffle and install the deck. The
-  /// concatenated blob is stored by the table and revealed once the deal is
-  /// scored (`#ShuffleRevealed`), so the shuffle can be replayed and audited.
+  /// Fetch the beacon entropy for a pending shuffle and install the deck. One
+  /// 32-byte `raw_rand` blob seeds the ChaCha20 keystream the shuffle draws
+  /// from (see `Shuffle.shuffleWithEntropy`); the blob is stored by the table
+  /// and revealed once the deal is scored (`#ShuffleRevealed`), so the shuffle
+  /// can be replayed and audited.
   func sealDeal(s : Table.State) : async () {
     if (not Table.needsShuffle(s)) { return };
-    var bytes : [Nat8] = [];
-    var i = 0;
-    while (i < ENTROPY_BLOBS) {
-      bytes := Array.concat<Nat8>(bytes, Blob.toArray(await Random.blob()));
-      i += 1;
-    };
-    Table.startDeal(s, Array.toBlob(bytes), Time.now());
+    Table.startDeal(s, await Random.blob(), Time.now());
   };
 
   /// After an ingress mutates a table: prune its event log
@@ -404,7 +398,7 @@ persistent actor {
 
   /// Largest legitimate card list in any ingress (a full one-suit hand is 25;
   /// the banker hand is 33). Anything larger is rejected before rule work.
-  let MAX_CARD_LIST : Nat = 34;
+  transient let MAX_CARD_LIST : Nat = 34;
 
   /// Basic card sanitisation: non-empty, bounded,
   /// unique, in range.
