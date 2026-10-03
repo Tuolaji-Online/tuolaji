@@ -451,13 +451,22 @@ persistent actor {
     if (not Types.validConfig(config)) {
       return #err({ code = #InvalidConfig; detail = "invalid table config" });
     };
-    let isPrivate = switch (req.isPrivate) { case (?v) { v }; case null { false } };
+    // A table is private exactly when it has an auth code, so derive the flag
+    // from it and only check the request's hint for consistency.
+    let isPrivate = req.authCode != null;
+    let wantsPrivate = switch (req.isPrivate) { case (?v) { v }; case null { false } };
+    if (wantsPrivate != isPrivate) {
+      return #err({ code = #InvalidAuthCode; detail = "isPrivate and authCode disagree" });
+    };
     // A private table is invite-only, so it must leave a seat open for the
     // invitee: reject a request that pre-claims every seat for bots.
     if (isPrivate and not hasOpenSeat(req.reserved)) {
       return #err({ code = #PrivateNeedsOpenSeat; detail = "a private table needs at least one open seat" });
     };
-    await create(config, req.reserved, req.avatar, req.clientId, isPrivate, msg.caller);
+    if (not Table.validAuthCode(req.authCode)) {
+      return #err({ code = #InvalidAuthCode; detail = "invalid auth code" });
+    };
+    await create(config, req.reserved, req.avatar, req.clientId, req.authCode, msg.caller);
   };
 
   func create(
@@ -465,7 +474,7 @@ persistent actor {
     reserved : ?[?Principal],
     avatar : ?Types.Avatar,
     clientId : ?Types.ClientId,
-    isPrivate : Bool,
+    authCode : ?Text,
     caller : Principal,
   ) : async Types.CreateResult {
     // Validate the caller-supplied avatar before touching any state.
@@ -491,7 +500,7 @@ persistent actor {
     };
     let id = nextTableId;
     nextTableId += 1;
-    let s = Table.newWithClient(id, cfg, caller, clientId, now, avatar, isPrivate);
+    let s = Table.newWithClient(id, cfg, caller, clientId, now, avatar, authCode);
     switch (reserved) {
       case (?r) { Table.assignReserved(s, r) };
       case null {};
@@ -503,7 +512,7 @@ persistent actor {
     #ok(id);
   };
 
-  public query func listTables(filter : Types.TableFilter) : async [Types.TableInfo] {
+  public query (msg) func listTables(filter : Types.TableFilter) : async [Types.TableInfo] {
     // Hard server-side page cap so a caller cannot force an unbounded scan.
     // `afterId` is an exclusive cursor over increasing table ids.
     let now = Time.now();
@@ -526,7 +535,7 @@ persistent actor {
             case null { true };
           };
           if (afterOk and emitted < cap) {
-            let info = Table.info(s);
+            let info = Table.infoFor(s, ?msg.caller);
             let over = Table.isOver(s, now);
             let phaseOk = switch (filter.phase) {
               case (?p) { if (p == #Ended) { info.phase == p or over } else { info.phase == p } };
@@ -540,10 +549,12 @@ persistent actor {
             // An ended table is only listed when it has a report to open: a
             // pruned log or no completed trick leaves nothing to show.
             let reportable = Table.hasTricks(s) and not Table.historyPruned(s);
-            // A private table is never listed live: it is reachable only by its
-            // id (`getTable`/the invitation link) while active, and appears in
-            // the ended listing once it is over.
-            if ((live or showEnded) and (showEnded or not info.isPrivate) and phaseOk and (showEnded or info.phase != #Ended) and (not filter.joinableOnly or info.joinable) and (not showEnded or reportable)) {
+            // A private table is hidden from the live listing, except to a
+            // principal who already holds a seat in it (so their other devices
+            // can find it and re-enter). It still appears in the ended listing
+            // once it is over.
+            let mine = info.isPrivate and Table.principalHasSeat(s, msg.caller);
+            if ((live or showEnded) and (showEnded or not info.isPrivate or mine) and phaseOk and (showEnded or info.phase != #Ended) and (not filter.joinableOnly or info.joinable) and (not showEnded or reportable)) {
               out.add(info);
               emitted += 1;
             };
@@ -556,9 +567,9 @@ persistent actor {
     out.toArray();
   };
 
-  public query func getTable(id : Types.TableId) : async ?Types.TableInfo {
+  public query (msg) func getTable(id : Types.TableId) : async ?Types.TableInfo {
     switch (find(id)) {
-      case (?s) { ?Table.info(s) };
+      case (?s) { ?Table.infoFor(s, ?msg.caller) };
       case null { null };
     };
   };
@@ -679,6 +690,12 @@ persistent actor {
     await sweepIdle(now);
     switch (find(req.id)) {
       case (?s) {
+        // A private table's auth code gates joining (a public table has null,
+        // and a join must present null there too). A trusted canister attaches
+        // its reserved seats without it.
+        if (not Access.isCanister(msg.caller) and req.authCode != s.authCode) {
+          return #err({ seq = Table.seqOf(s); code = #InvalidAuthCode; detail = "auth code mismatch" });
+        };
         // One seat per principal per table; a second seat needs the bot
         // whitelist. Attaching to a seat already claimed for this principal is
         // not a second seat.
@@ -880,6 +897,7 @@ persistent actor {
       decl = null;
       config = Types.defaultConfig;
       isPrivate = false;
+      authCode = null;
       banker = null;
       prospectiveBanker = null;
       dealer = 0;

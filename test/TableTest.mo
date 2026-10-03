@@ -393,7 +393,7 @@ module {
   func testAvatar(t : Test.Harness, ps : [Principal]) {
     t.suite("M2 avatar validation");
     // The creator's avatar is stored at creation and exposed to every client.
-    let st = Table.newWithClient(0, Types.defaultConfig, ps[0], null, 0, ?{ preset = "cat"; style = "ocean" }, false);
+    let st = Table.newWithClient(0, Types.defaultConfig, ps[0], null, 0, ?{ preset = "cat"; style = "ocean" }, null);
     switch (Table.view(st, ps[0]).seats[0].avatar) {
       case (?a) { t.check(a.preset == "cat" and a.style == "ocean", "avatar exposed in the view") };
       case null { t.check(false, "avatar exposed in the view") };
@@ -494,7 +494,7 @@ module {
 
   func testPrivate(t : Test.Harness, ps : [Principal]) {
     t.suite("M5 private table");
-    let st = Table.newWithClient(0, Types.defaultConfig, ps[0], null, 0, null, true);
+    let st = Table.newWithClient(0, Types.defaultConfig, ps[0], null, 0, null, ?"abcd1234");
     t.check(Table.info(st).isPrivate, "info reports a private table");
     t.check(Table.view(st, ps[0]).isPrivate, "the player view reports a private table");
     t.check(not Table.info(Table.new(1, Types.defaultConfig, ps[0], 0)).isPrivate, "a table created public is not private");
@@ -503,7 +503,7 @@ module {
     t.check(not Table.isIdle(st, Table.PRIVATE_IDLE_RETENTION_NANOS), "private is not idle at 48h exactly");
     t.check(Table.isIdle(st, Table.PRIVATE_IDLE_RETENTION_NANOS + 1), "private is idle past 48h");
     // Any event extends endingTime by the private window.
-    let st2 = Table.newWithClient(0, Types.defaultConfig, ps[0], null, 0, null, true);
+    let st2 = Table.newWithClient(0, Types.defaultConfig, ps[0], null, 0, null, ?"abcd1234");
     ignore Table.ready(st2, ps[0], 12345);
     t.check(
       st2.endingTime == 12345 + Table.PRIVATE_IDLE_RETENTION_NANOS,
@@ -512,7 +512,7 @@ module {
     // A private table never ends for want of humans, and emptying out does not
     // end it either — an invitee may still arrive.
     let isBot = func(_p : Principal) : Bool { true };
-    let st3 = Table.newWithClient(0, Types.defaultConfig, ps[0], null, 0, null, true);
+    let st3 = Table.newWithClient(0, Types.defaultConfig, ps[0], null, 0, null, ?"abcd1234");
     ignore Table.leave(st3, ps[0], null, 0);
     t.check(not Table.endIfNoHumans(st3, isBot, 1), "a private table is not ended with no humans");
     t.check(not phaseEq(Table.info(st3).phase, #Ended), "emptying a private table does not end it");
@@ -521,7 +521,7 @@ module {
     t.check(phaseEq(Table.info(st3).phase, #Ended), "the swept private table is Ended");
     // A private table can be rejoined mid-deal: the abandoned seat is joinable
     // and an invitee may take it. A public table rejects the same join.
-    let st4 = Table.newWithClient(4, Types.defaultConfig, ps[0], null, 0, null, true);
+    let st4 = Table.newWithClient(4, Types.defaultConfig, ps[0], null, 0, null, ?"abcd1234");
     Table.debugForce(st4, #Playing, null, 0);
     ignore Table.leave(st4, ps[0], null, 0);
     t.check(Table.info(st4).joinable, "a private table is joinable mid-deal");

@@ -85,6 +85,9 @@ module {
     // createTable rejected: a private table must leave at least one seat open
     // (not pre-claimed for a bot), so the invitation link has somewhere to land.
     #PrivateNeedsOpenSeat;
+    // joinTable rejected: the supplied auth code does not match the table's
+    // (a private table's invitation link carries it).
+    #InvalidAuthCode;
   };
 
   public type CheckError = { code : ErrorCode; detail : Text };
@@ -215,6 +218,10 @@ module {
     config : TableConfig;
     // Whether the table was created private (see `CreateTableRequest.isPrivate`).
     isPrivate : Bool;
+    // The table's auth code, returned only to a principal who holds a seat in
+    // it (null otherwise), so an invitation link can be rebuilt on another
+    // device. Null for a public table.
+    authCode : ?Text;
     // When the table was created, and when it ended (null while still live),
     // so the lobby can show a start time and duration for ended tables.
     startedAt : Timestamp;
@@ -419,6 +426,9 @@ module {
     // the client keeps the seat hand-over choice and hands it to a bot rather
     // than freeing it.
     isPrivate : Bool;
+    // The table's auth code, present only when the viewer holds a seat (null
+    // for a spectator or a non-member), so it can build invitation links.
+    authCode : ?Text;
     banker : ?Seat;
     // The prospective banker (declarer, else rotating dealer) once a bank is
     // decided, so the UI can mark the seat before the deal starts. Null while
@@ -522,6 +532,10 @@ module {
     // link. It keeps a 48-hour idle window and is never ended merely because
     // no human is seated, since an invitee may still arrive.
     isPrivate : ?Bool;
+    // A private table's shared secret. The creator generates it and the
+    // invitation link carries it; joinTable must present a matching value.
+    // Null for a public table (and a join must then also present null).
+    authCode : ?Text;
   };
 
   public type GetPlayHistoryRequest = {
@@ -560,6 +574,9 @@ module {
     // Canister-only hint: whether the attached seat may later be taken over by
     // a human. Omitted by human clients (defaults to false).
     replaceable : ?Bool;
+    // The private table's auth code (from the invitation link). Must equal the
+    // table's own value; a public table has null and so must this.
+    authCode : ?Text;
   };
 
   public type ReadyRequest = {

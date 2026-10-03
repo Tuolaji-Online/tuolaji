@@ -21,7 +21,7 @@ module {
   /// A 4-seat table owned by `p` in two seats (distinct client ids) and two
   /// other principals, readied into `#Dealing` and dealt one card each.
   func dealt(p : Principal, others : [Principal], id0 : Types.ClientId, id1 : Types.ClientId) : Table.State {
-    let st = Table.newWithClient(0, Types.defaultConfig, p, ?id0, 0, null, false);
+    let st = Table.newWithClient(0, Types.defaultConfig, p, ?id0, 0, null, null);
     ignore Table.joinTableWithClient(st, p, ?id1, 1, null, null, 0);
     ignore Table.joinTable(st, others[0], 2, 0);
     ignore Table.joinTable(st, others[1], 3, 0);

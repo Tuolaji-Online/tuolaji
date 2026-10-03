@@ -61,6 +61,9 @@ module {
   /// than any preset/style id) and rejects anything empty or longer.
   public let MAX_AVATAR_FIELD : Nat = 20;
 
+  /// Longest accepted auth code. Short enough to read off an invitation link.
+  public let MAX_AUTH_CODE : Nat = 8;
+
   public type State = {
     id : Types.TableId;
     var phase : Types.Phase;
@@ -114,8 +117,9 @@ module {
     var kittyRevealed : Bool;
     var startedAt : Types.Timestamp;
     // Set once at creation. A private table is hidden from the live listings,
-    // keeps a 48-hour idle window and never auto-ends with no humans.
-    isPrivate : Bool;
+    // keeps a 48-hour idle window and never auto-ends with no humans. A table
+    // is private exactly when this is non-null (see `isPrivate`).
+    authCode : ?Text;
     // Server time by which the table is idle (no event since
     // `endingTime - idleRetention(id)`) and should be treated as ended.
     // Extended to `now + idleRetention(id)` on every event, so clients can
@@ -165,6 +169,12 @@ module {
   /// client id. Used to enforce the one-seat-per-table rule for non-bots.
   public func principalHasSeat(st : State, who : Principal) : Bool {
     seatOf(st, who) != null;
+  };
+
+  /// A table is private exactly when it has an auth code. The flag is derived
+  /// rather than stored, so the two can never disagree.
+  public func isPrivate(st : State) : Bool {
+    st.authCode != null;
   };
 
   /// True when `who` owns an occupied seat other than `seat`. Lets a principal
@@ -420,14 +430,14 @@ module {
     st.seq += 1;
     st.log.add({ seq = st.seq; at = now; body });
     // Any event is activity: push the idle deadline out.
-    st.endingTime := now + idleRetention(st.isPrivate);
+    st.endingTime := now + idleRetention(isPrivate(st));
     st.seq;
   };
 
   /// The idle window before a table is swept to `Ended`: private tables are
   /// kept for 48 hours (an invitee may be slow), public tables for 10 minutes.
-  func idleRetention(isPrivate : Bool) : Int {
-    if (isPrivate) { PRIVATE_IDLE_RETENTION_NANOS } else { IDLE_RETENTION_NANOS };
+  func idleRetention(privateTable : Bool) : Int {
+    if (privateTable) { PRIVATE_IDLE_RETENTION_NANOS } else { IDLE_RETENTION_NANOS };
   };
 
   func ok(st : State) : Types.ActionResult {
@@ -462,7 +472,7 @@ module {
     creator : Principal,
     now : Types.Timestamp,
   ) : State {
-    newWithClient(id, cfg, creator, null, now, null, false)
+    newWithClient(id, cfg, creator, null, now, null, null)
   };
 
   public func newWithClient(
@@ -472,7 +482,7 @@ module {
     clientId : ?Types.ClientId,
     now : Types.Timestamp,
     avatar : ?Types.Avatar,
-    isPrivate : Bool,
+    authCode : ?Text,
   ) : State {
     let st : State = {
       id;
@@ -517,8 +527,8 @@ module {
       var voids = Basic.emptyVoids();
       var kittyRevealed = false;
       var startedAt = now;
-      isPrivate;
-      var endingTime = now + idleRetention(isPrivate);
+      authCode;
+      var endingTime = now + idleRetention(authCode != null);
       var endedAt = null;
       var lastTrick = null;
     };
@@ -596,7 +606,7 @@ module {
         // emptied mid-deal is refilled before the next deal, or mid-deal in a
         // private table — invite-only, so the invitee may take over the
         // abandoned, auto-played seat.
-        if (st.phase != #Lobby and st.phase != #Scoring and not st.isPrivate) {
+        if (st.phase != #Lobby and st.phase != #Scoring and not isPrivate(st)) {
           return err(st, #NotInLobby, "not in lobby");
         };
         st.seats[seat] := ?{ principal = caller; clientId; client = null; takenAt = st.seq; replaceable = replaceableOf(replaceable) };
@@ -677,7 +687,7 @@ module {
         // A private table stays open when it empties: an invitee may still
         // arrive through its link inside the 48-hour window. A public table
         // that has lost every player is finished.
-        if (filledCount(st) == 0 and not st.isPrivate) {
+        if (filledCount(st) == 0 and not isPrivate(st)) {
           finishTable(st, now, #Empty);
         };
         ok(st);
@@ -696,6 +706,14 @@ module {
         let s = Text.size(a.style);
         p > 0 and p <= MAX_AVATAR_FIELD and s > 0 and s <= MAX_AVATAR_FIELD;
       };
+    };
+  };
+
+  /// A valid auth code is null (a public table) or 1..MAX_AUTH_CODE characters.
+  public func validAuthCode(code : ?Text) : Bool {
+    switch (code) {
+      case null { true };
+      case (?c) { let n = Text.size(c); n > 0 and n <= MAX_AUTH_CODE };
     };
   };
 
@@ -730,7 +748,7 @@ module {
   ) : Bool {
     // A private table is never ended for want of humans: its seats may still be
     // filled through invitation links.
-    if (st.isPrivate) { return false };
+    if (isPrivate(st)) { return false };
     if (not st.cfg.endWhenAllBots) { return false };
     if (st.phase == #Ended) { return false };
     var noHumans = true;
@@ -1755,10 +1773,13 @@ module {
     var startBankerLevel = 2;
     var startAttackerLevel = 2;
     var startBankTeam = 0;
-    // Per-seat participant now, and at the start of the current deal, so a
-    // seat that changed hands mid-deal can flag it.
+    // Per-seat participant now, at the start of the current deal (so a seat
+    // that changed hands mid-deal can flag it), and the last occupant seen
+    // during the deal (so a seat that emptied mid-deal still reports who was
+    // there).
     let seats = VarArray.repeat<?Types.SeatSnapshot>(null, 4);
     let startSeats = VarArray.repeat<?Types.SeatSnapshot>(null, 4);
+    let dealSeats = VarArray.repeat<?Types.SeatSnapshot>(null, 4);
     let changed = VarArray.repeat<Bool>(false, 4);
     for (e in st.log.values()) {
       switch (e.body) {
@@ -1773,6 +1794,7 @@ module {
           var i = 0;
           while (i < 4) {
             startSeats[i] := seats[i];
+            dealSeats[i] := seats[i];
             changed[i] := false;
             i += 1;
           };
@@ -1793,7 +1815,10 @@ module {
           buriedKitty := k.cards;
         };
         case (#PlayerJoined(p)) {
-          seats[p.seat] := ?{ principal = ?p.who; avatar = p.avatar };
+          let snap = ?{ principal = ?p.who; avatar = p.avatar };
+          seats[p.seat] := snap;
+          // A seat may change hands mid-deal; the deal reports the last one.
+          dealSeats[p.seat] := snap;
           changed[p.seat] := true;
         };
         case (#PlayerLeft(l)) {
@@ -1820,7 +1845,7 @@ module {
             bankerAvatar;
             bankerSeat = banker;
             seats = Array.map<?Types.SeatSnapshot, Types.SeatSnapshot>(
-              VarArray.toArray(seats),
+              VarArray.toArray(dealSeats),
               func(sn) = switch (sn) { case (?x) { x }; case null { { principal = null; avatar = null } } },
             );
             changed = VarArray.toArray(changed);
@@ -1889,7 +1914,10 @@ module {
       trump = st.trump;
       decl = st.decl;
       config = st.cfg;
-      isPrivate = st.isPrivate;
+      isPrivate = isPrivate(st);
+      // Only a seated viewer gets the auth code; a spectator or observer sees
+      // null and cannot build an invitation link.
+      authCode = switch (mySeat) { case (?_) { st.authCode }; case null { null } };
       // During dealing the banker is the deterministic prospect; otherwise it
       // is the decided seat (null in the lobby).
       banker = switch (st.phase) {
@@ -1974,6 +2002,16 @@ module {
   };
 
   public func info(st : State) : Types.TableInfo {
+    infoFor(st, null);
+  };
+
+  /// Like `info`, but reveals the auth code when `caller` holds a seat.
+  public func infoFor(st : State, caller : ?Principal) : Types.TableInfo {
+    // The auth code is a secret: only a principal who holds a seat may see it.
+    let member = switch (caller) {
+      case (?p) { principalHasSeat(st, p) };
+      case null { false };
+    };
     {
       tableId = st.id;
       phase = st.phase;
@@ -1989,10 +2027,11 @@ module {
       // deal has not started, so a seat that emptied mid-deal can be refilled.
       // A private table is joinable in any live phase, so an invitation link
       // can refill a seat the last player abandoned mid-deal.
-      joinable = (st.phase == #Lobby or st.phase == #Scoring or st.isPrivate) and hasEmptySeat(st);
+      joinable = (st.phase == #Lobby or st.phase == #Scoring or isPrivate(st)) and hasEmptySeat(st);
       banker = prospectiveBanker(st);
       config = st.cfg;
-      isPrivate = st.isPrivate;
+      isPrivate = isPrivate(st);
+      authCode = if (member) { st.authCode } else { null };
       startedAt = st.startedAt;
       // A table that is not explicitly ended has no `endedAt`; let the duration
       // run through the last activity instead of showing nothing (the idle
