@@ -82,6 +82,9 @@ module {
     #InsufficientCycles;
     #NotWhitelisted;
     #NotAuthorized;
+    // createTable rejected: a private table must leave at least one seat open
+    // (not pre-claimed for a bot), so the invitation link has somewhere to land.
+    #PrivateNeedsOpenSeat;
   };
 
   public type CheckError = { code : ErrorCode; detail : Text };
@@ -210,6 +213,8 @@ module {
     banker : ?Seat;
     // The game configuration this table was created with.
     config : TableConfig;
+    // Whether the table was created private (see `CreateTableRequest.isPrivate`).
+    isPrivate : Bool;
     // When the table was created, and when it ended (null while still live),
     // so the lobby can show a start time and duration for ended tables.
     startedAt : Timestamp;
@@ -410,6 +415,10 @@ module {
     trump : ?Suit;
     decl : ?Declaration;
     config : TableConfig;
+    // Whether the table is private. A private table is not ended by leaving, so
+    // the client keeps the seat hand-over choice and hands it to a bot rather
+    // than freeing it.
+    isPrivate : Bool;
     banker : ?Seat;
     // The prospective banker (declarer, else rotating dealer) once a bank is
     // decided, so the UI can mark the seat before the deal starts. Null while
@@ -508,6 +517,11 @@ module {
     reserved : ?[?Principal];
     avatar : ?Avatar;
     clientId : ?ClientId;
+    // A private table is hidden from the live `listTables` listings (it only
+    // appears once ended), so it is reachable only by its id — the invitation
+    // link. It keeps a 48-hour idle window and is never ended merely because
+    // no human is seated, since an invitee may still arrive.
+    isPrivate : ?Bool;
   };
 
   public type GetPlayHistoryRequest = {

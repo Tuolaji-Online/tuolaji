@@ -393,7 +393,7 @@ module {
   func testAvatar(t : Test.Harness, ps : [Principal]) {
     t.suite("M2 avatar validation");
     // The creator's avatar is stored at creation and exposed to every client.
-    let st = Table.newWithClient(0, Types.defaultConfig, ps[0], null, 0, ?{ preset = "cat"; style = "ocean" });
+    let st = Table.newWithClient(0, Types.defaultConfig, ps[0], null, 0, ?{ preset = "cat"; style = "ocean" }, false);
     switch (Table.view(st, ps[0]).seats[0].avatar) {
       case (?a) { t.check(a.preset == "cat" and a.style == "ocean", "avatar exposed in the view") };
       case null { t.check(false, "avatar exposed in the view") };
@@ -492,6 +492,47 @@ module {
     );
   };
 
+  func testPrivate(t : Test.Harness, ps : [Principal]) {
+    t.suite("M5 private table");
+    let st = Table.newWithClient(0, Types.defaultConfig, ps[0], null, 0, null, true);
+    t.check(Table.info(st).isPrivate, "info reports a private table");
+    t.check(Table.view(st, ps[0]).isPrivate, "the player view reports a private table");
+    t.check(not Table.info(Table.new(1, Types.defaultConfig, ps[0], 0)).isPrivate, "a table created public is not private");
+    // The idle window is the 48-hour one, not the 10-minute default.
+    t.check(not Table.isIdle(st, Table.IDLE_RETENTION_NANOS + 1), "private is not idle after 10 minutes");
+    t.check(not Table.isIdle(st, Table.PRIVATE_IDLE_RETENTION_NANOS), "private is not idle at 48h exactly");
+    t.check(Table.isIdle(st, Table.PRIVATE_IDLE_RETENTION_NANOS + 1), "private is idle past 48h");
+    // Any event extends endingTime by the private window.
+    let st2 = Table.newWithClient(0, Types.defaultConfig, ps[0], null, 0, null, true);
+    ignore Table.ready(st2, ps[0], 12345);
+    t.check(
+      st2.endingTime == 12345 + Table.PRIVATE_IDLE_RETENTION_NANOS,
+      "an event extends a private table's endingTime by 48h",
+    );
+    // A private table never ends for want of humans, and emptying out does not
+    // end it either — an invitee may still arrive.
+    let isBot = func(_p : Principal) : Bool { true };
+    let st3 = Table.newWithClient(0, Types.defaultConfig, ps[0], null, 0, null, true);
+    ignore Table.leave(st3, ps[0], null, 0);
+    t.check(not Table.endIfNoHumans(st3, isBot, 1), "a private table is not ended with no humans");
+    t.check(not phaseEq(Table.info(st3).phase, #Ended), "emptying a private table does not end it");
+    // The idle sweep still ends it.
+    t.check(Table.endIfIdle(st3, Table.PRIVATE_IDLE_RETENTION_NANOS + 1), "the idle sweep ends a private table");
+    t.check(phaseEq(Table.info(st3).phase, #Ended), "the swept private table is Ended");
+    // A private table can be rejoined mid-deal: the abandoned seat is joinable
+    // and an invitee may take it. A public table rejects the same join.
+    let st4 = Table.newWithClient(4, Types.defaultConfig, ps[0], null, 0, null, true);
+    Table.debugForce(st4, #Playing, null, 0);
+    ignore Table.leave(st4, ps[0], null, 0);
+    t.check(Table.info(st4).joinable, "a private table is joinable mid-deal");
+    t.check(isOk(Table.joinTable(st4, ps[1], 0, 1)), "an invitee joins the empty seat mid-deal");
+    let st5 = Table.new(5, Types.defaultConfig, ps[0], 0);
+    Table.debugForce(st5, #Playing, null, 0);
+    ignore Table.leave(st5, ps[0], null, 0);
+    t.check(not Table.info(st5).joinable, "a public table is not joinable mid-deal");
+    t.check(not isOk(Table.joinTable(st5, ps[1], 0, 1)), "a public mid-deal join is rejected");
+  };
+
   func testConfig(t : Test.Harness) {
     t.suite("M2 config validation");
     t.check(Types.validConfig(Types.defaultConfig), "the default config is valid");
@@ -572,6 +613,7 @@ module {
     testInfo(t, ps);
     testLeaveEndsEmpty(t, ps);
     testIdle(t, ps);
+    testPrivate(t, ps);
     testNextTimer(t, ps);
     testReservedSeats(t, ps);
     testEndWhenAllBots(t, ps);

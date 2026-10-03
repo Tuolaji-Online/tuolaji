@@ -42,6 +42,11 @@ module {
   /// `createTable`/`joinTable`, so abandoned tables cannot be joined or linger.
   public let IDLE_RETENTION_NANOS : Int = 600_000_000_000; // 10 minutes
 
+  /// The idle window for a private table: an invitation link may be opened long
+  /// after the table was created, so it is kept for 48 hours rather than 10
+  /// minutes. See `idleRetention`.
+  public let PRIVATE_IDLE_RETENTION_NANOS : Int = 172_800_000_000_000; // 48 hours
+
   /// How often the timer retries an auto-play whose heuristic move was
   /// rejected, so a bug cannot leave a turn with no armed deadline.
   public let AUTO_RETRY_NANOS : Int = 5_000_000_000; // 5 seconds
@@ -108,9 +113,12 @@ module {
     var voids : [Bool];
     var kittyRevealed : Bool;
     var startedAt : Types.Timestamp;
+    // Set once at creation. A private table is hidden from the live listings,
+    // keeps a 48-hour idle window and never auto-ends with no humans.
+    isPrivate : Bool;
     // Server time by which the table is idle (no event since
-    // `endingTime - IDLE_RETENTION_NANOS`) and should be treated as ended.
-    // Extended to `now + IDLE_RETENTION_NANOS` on every event, so clients can
+    // `endingTime - idleRetention(id)`) and should be treated as ended.
+    // Extended to `now + idleRetention(id)` on every event, so clients can
     // decide locally that the table is over.
     var endingTime : Types.Timestamp;
     var endedAt : ?Types.Timestamp;
@@ -412,8 +420,14 @@ module {
     st.seq += 1;
     st.log.add({ seq = st.seq; at = now; body });
     // Any event is activity: push the idle deadline out.
-    st.endingTime := now + IDLE_RETENTION_NANOS;
+    st.endingTime := now + idleRetention(st.isPrivate);
     st.seq;
+  };
+
+  /// The idle window before a table is swept to `Ended`: private tables are
+  /// kept for 48 hours (an invitee may be slow), public tables for 10 minutes.
+  func idleRetention(isPrivate : Bool) : Int {
+    if (isPrivate) { PRIVATE_IDLE_RETENTION_NANOS } else { IDLE_RETENTION_NANOS };
   };
 
   func ok(st : State) : Types.ActionResult {
@@ -448,7 +462,7 @@ module {
     creator : Principal,
     now : Types.Timestamp,
   ) : State {
-    newWithClient(id, cfg, creator, null, now, null)
+    newWithClient(id, cfg, creator, null, now, null, false)
   };
 
   public func newWithClient(
@@ -458,6 +472,7 @@ module {
     clientId : ?Types.ClientId,
     now : Types.Timestamp,
     avatar : ?Types.Avatar,
+    isPrivate : Bool,
   ) : State {
     let st : State = {
       id;
@@ -502,7 +517,8 @@ module {
       var voids = Basic.emptyVoids();
       var kittyRevealed = false;
       var startedAt = now;
-      var endingTime = now + IDLE_RETENTION_NANOS;
+      isPrivate;
+      var endingTime = now + idleRetention(isPrivate);
       var endedAt = null;
       var lastTrick = null;
     };
@@ -576,9 +592,13 @@ module {
     if (not validAvatar(avatar)) { return err(st, #InvalidAvatar, "invalid avatar") };
     switch (st.seats[seat]) {
       case null {
-        // An open seat can be taken in the lobby, or in `#Scoring` so a seat
-        // that emptied mid-deal can be refilled before the next deal.
-        if (st.phase != #Lobby and st.phase != #Scoring) { return err(st, #NotInLobby, "not in lobby") };
+        // An open seat can be taken in the lobby, in `#Scoring` so a seat that
+        // emptied mid-deal is refilled before the next deal, or mid-deal in a
+        // private table — invite-only, so the invitee may take over the
+        // abandoned, auto-played seat.
+        if (st.phase != #Lobby and st.phase != #Scoring and not st.isPrivate) {
+          return err(st, #NotInLobby, "not in lobby");
+        };
         st.seats[seat] := ?{ principal = caller; clientId; client = null; takenAt = st.seq; replaceable = replaceableOf(replaceable) };
         st.ready[seat] := false;
         st.avatars[seat] := avatar;
@@ -654,7 +674,10 @@ module {
             ensureEmptySeatProgress(st, s, now);
           };
         };
-        if (filledCount(st) == 0) {
+        // A private table stays open when it empties: an invitee may still
+        // arrive through its link inside the 48-hour window. A public table
+        // that has lost every player is finished.
+        if (filledCount(st) == 0 and not st.isPrivate) {
           finishTable(st, now, #Empty);
         };
         ok(st);
@@ -705,6 +728,9 @@ module {
     isBot : Principal -> Bool,
     now : Types.Timestamp,
   ) : Bool {
+    // A private table is never ended for want of humans: its seats may still be
+    // filled through invitation links.
+    if (st.isPrivate) { return false };
     if (not st.cfg.endWhenAllBots) { return false };
     if (st.phase == #Ended) { return false };
     var noHumans = true;
@@ -1863,6 +1889,7 @@ module {
       trump = st.trump;
       decl = st.decl;
       config = st.cfg;
+      isPrivate = st.isPrivate;
       // During dealing the banker is the deterministic prospect; otherwise it
       // is the decided seat (null in the lobby).
       banker = switch (st.phase) {
@@ -1960,9 +1987,12 @@ module {
       endingTime = st.endingTime;
       // A truly empty seat makes a table joinable; in `#Scoring` the next
       // deal has not started, so a seat that emptied mid-deal can be refilled.
-      joinable = (st.phase == #Lobby or st.phase == #Scoring) and hasEmptySeat(st);
+      // A private table is joinable in any live phase, so an invitation link
+      // can refill a seat the last player abandoned mid-deal.
+      joinable = (st.phase == #Lobby or st.phase == #Scoring or st.isPrivate) and hasEmptySeat(st);
       banker = prospectiveBanker(st);
       config = st.cfg;
+      isPrivate = st.isPrivate;
       startedAt = st.startedAt;
       // A table that is not explicitly ended has no `endedAt`; let the duration
       // run through the last activity instead of showing nothing (the idle

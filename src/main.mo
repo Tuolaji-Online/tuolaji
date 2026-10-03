@@ -68,6 +68,25 @@ persistent actor {
     Set.contains(botPrincipals, p);
   };
 
+  /// Does a create request leave at least one seat (1..3) unclaimed for an
+  /// invitee? Seat 0 is always the creator; a null or short `reserved` leaves
+  /// the remaining seats open.
+  func hasOpenSeat(reserved : ?[?Principal]) : Bool {
+    switch (reserved) {
+      case null { true };
+      case (?r) {
+        var open = false;
+        var i = 1;
+        while (i < 4 and not open) {
+          let claimed = i < r.size() and r[i] != null;
+          if (not claimed) { open := true };
+          i += 1;
+        };
+        open;
+      };
+    };
+  };
+
   /// A non-bot principal may hold at most one seat per table. Reject a
   /// creation whose reservations claim the same non-bot principal more than
   /// once (seat 0 is the creator's implicit claim). Trusted bots are exempt:
@@ -432,7 +451,13 @@ persistent actor {
     if (not Types.validConfig(config)) {
       return #err({ code = #InvalidConfig; detail = "invalid table config" });
     };
-    await create(config, req.reserved, req.avatar, req.clientId, msg.caller);
+    let isPrivate = switch (req.isPrivate) { case (?v) { v }; case null { false } };
+    // A private table is invite-only, so it must leave a seat open for the
+    // invitee: reject a request that pre-claims every seat for bots.
+    if (isPrivate and not hasOpenSeat(req.reserved)) {
+      return #err({ code = #PrivateNeedsOpenSeat; detail = "a private table needs at least one open seat" });
+    };
+    await create(config, req.reserved, req.avatar, req.clientId, isPrivate, msg.caller);
   };
 
   func create(
@@ -440,6 +465,7 @@ persistent actor {
     reserved : ?[?Principal],
     avatar : ?Types.Avatar,
     clientId : ?Types.ClientId,
+    isPrivate : Bool,
     caller : Principal,
   ) : async Types.CreateResult {
     // Validate the caller-supplied avatar before touching any state.
@@ -465,7 +491,7 @@ persistent actor {
     };
     let id = nextTableId;
     nextTableId += 1;
-    let s = Table.newWithClient(id, cfg, caller, clientId, now, avatar);
+    let s = Table.newWithClient(id, cfg, caller, clientId, now, avatar, isPrivate);
     switch (reserved) {
       case (?r) { Table.assignReserved(s, r) };
       case null {};
@@ -514,7 +540,10 @@ persistent actor {
             // An ended table is only listed when it has a report to open: a
             // pruned log or no completed trick leaves nothing to show.
             let reportable = Table.hasTricks(s) and not Table.historyPruned(s);
-            if ((live or showEnded) and phaseOk and (showEnded or info.phase != #Ended) and (not filter.joinableOnly or info.joinable) and (not showEnded or reportable)) {
+            // A private table is never listed live: it is reachable only by its
+            // id (`getTable`/the invitation link) while active, and appears in
+            // the ended listing once it is over.
+            if ((live or showEnded) and (showEnded or not info.isPrivate) and phaseOk and (showEnded or info.phase != #Ended) and (not filter.joinableOnly or info.joinable) and (not showEnded or reportable)) {
               out.add(info);
               emitted += 1;
             };
@@ -850,6 +879,7 @@ persistent actor {
       trump = null;
       decl = null;
       config = Types.defaultConfig;
+      isPrivate = false;
       banker = null;
       prospectiveBanker = null;
       dealer = 0;

@@ -52,6 +52,9 @@ table at or past it is idle and treated as ended. The lobby hides it and the
 next `createTable`/`joinTable` sweeps it to `Ended`, while clients compare their
 own clock against `endingTime` so a seated player is told the table is over
 without waiting for a sweep. Ended tables are kept for 2 days, then evicted.
+A **private** table (created with `isPrivate`) uses a 48-hour idle window, is
+hidden from the active-tables list so it is reachable only by its invitation
+link, and is not ended merely because no human is seated.
 
 ## How clients talk to the canister
 
