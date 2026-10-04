@@ -103,16 +103,31 @@ module {
     #Ended;
   };
 
+  /// Bot and client-hint intelligence for a table. `#Low`/`#Mid`/`#High` map
+  /// to the L1/L3/L5 strategy levels catalogued in `docs/BOT.md` §16.
+  public type Intelligence = { #Low; #Mid; #High };
+
   public type TableConfig = {
     targetLevel : Level;
+    // Seconds between dealing packets. 0 deals as fast as the scheduler runs.
     dealTickSeconds : Nat;
-    declareSeconds : ?Nat; // post-deal declaration window; null = lock as soon as the deck is out
-    overrideSeconds : ?Nat; // counter-declaration window after a call; null = lock immediately
-    burySeconds : ?Nat; // banker kitty timeout; null = wait indefinitely
-    playSeconds : ?Nat; // turn timeout -> auto-play; null = wait indefinitely
-    eventRetentionSeconds : ?Nat; // event-log retention; null = keep forever
+    // Post-deal declaration window. 0 locks the trump as soon as the deck is
+    // out (no window).
+    declareSeconds : Nat;
+    // Counter-declaration window after a call. 0 locks immediately.
+    overrideSeconds : Nat;
+    // Banker kitty timeout before an automatic bury. 0 waits indefinitely.
+    burySeconds : Nat;
+    // Turn timeout before an automatic play. 0 waits indefinitely.
+    playSeconds : Nat;
+    // Event-log retention. Must be positive (see `validConfig`): 0 would keep
+    // the log forever and let stable memory grow without bound.
+    eventRetentionSeconds : Nat;
     firstDealer : Seat;
     enhancedJokerOverride : Bool;
+    // A hint for client implementations: the intelligence a hint button could
+    // guide the viewer at. Clients are **not** obliged to follow it.
+    hintLevel : Intelligence;
     // End the table as soon as no human-owned seat remains (every occupied seat
     // is a whitelisted bot, or none are occupied). Tests that run all-bot
     // tables set this false to keep them alive.
@@ -122,13 +137,14 @@ module {
   public let defaultConfig : TableConfig = {
     targetLevel = 14;
     dealTickSeconds = 1;
-    declareSeconds = ?15;
-    overrideSeconds = ?10;
-    burySeconds = ?60;
-    playSeconds = ?45;
-    eventRetentionSeconds = ?259200; // 3 days
+    declareSeconds = 15;
+    overrideSeconds = 10;
+    burySeconds = 60;
+    playSeconds = 45;
+    eventRetentionSeconds = 259200; // 3 days
     firstDealer = 0;
     enhancedJokerOverride = false;
+    hintLevel = #High;
     endWhenAllBots = true;
   };
 
@@ -137,34 +153,24 @@ module {
   public let MAX_TICK_SECONDS : Nat = 3600; // 1 hour between deal ticks
   public let MAX_PHASE_SECONDS : Nat = 86_400; // 1 day for a declare/bury/play timer
   public let MAX_RETENTION_SECONDS : Nat = 2_592_000; // 30 days of event history
+  /// The event log is always bounded: a zero retention (keep forever) is
+  /// rejected rather than accepted as an unbounded memory policy.
+  public let MIN_RETENTION_SECONDS : Nat = 1;
 
-  func validTimeout(t : ?Nat) : Bool {
-    switch (t) {
-      case null { true };
-      case (?s) { s <= MAX_PHASE_SECONDS };
-    };
-  };
-
-  func validRetention(t : ?Nat) : Bool {
-    switch (t) {
-      case null { true };
-      case (?s) { s > 0 and s <= MAX_RETENTION_SECONDS };
-    };
-  };
-
-  /// Reject a client-supplied config that is not sensible: the level and dealer
-  /// must be in range, timers must be bounded, and a retention window (when
-  /// given) must be positive and bounded. `null` fields mean "wait forever"
-  /// (or, for retention, "keep forever") and are always allowed.
+  /// Reject a client-supplied config that is not sensible. Every timer is a
+  /// plain `Nat` (no `null`); `0` is the documented "off" value for the game
+  /// timers, and each value must stay within its cap. Retention must be
+  /// positive so the event log cannot grow without bound.
   public func validConfig(cfg : TableConfig) : Bool {
     cfg.targetLevel >= 2 and cfg.targetLevel <= 14 and
     cfg.firstDealer < 4 and
     cfg.dealTickSeconds <= MAX_TICK_SECONDS and
-    validTimeout(cfg.declareSeconds) and
-    validTimeout(cfg.overrideSeconds) and
-    validTimeout(cfg.burySeconds) and
-    validTimeout(cfg.playSeconds) and
-    validRetention(cfg.eventRetentionSeconds);
+    cfg.declareSeconds <= MAX_PHASE_SECONDS and
+    cfg.overrideSeconds <= MAX_PHASE_SECONDS and
+    cfg.burySeconds <= MAX_PHASE_SECONDS and
+    cfg.playSeconds <= MAX_PHASE_SECONDS and
+    cfg.eventRetentionSeconds >= MIN_RETENTION_SECONDS and
+    cfg.eventRetentionSeconds <= MAX_RETENTION_SECONDS;
   };
 
   public type SeatInfo = {
@@ -209,6 +215,12 @@ module {
     // Every event extends it, so a client can decide locally that the table is
     // over once its own clock passes this value.
     endingTime : Timestamp;
+    // Server time of the table's most recent event. A client that remembers a
+    // table locally uses it to decide whether the table has been quiet long
+    // enough (10 minutes) that auto-returning the player is more surprising
+    // than helpful. Private tables stay alive for 48 hours, so `endingTime`
+    // alone cannot answer that.
+    lastActivity : Timestamp;
     joinable : Bool;
     // The prospective banker (declarer, else the rotating dealer) once a bank
     // is decided, so the lobby can mark the seat before the deal starts. Null
@@ -417,6 +429,8 @@ module {
     // Server time by which the table is idle and should be treated as ended;
     // see `TableInfo.endingTime`.
     endingTime : Timestamp;
+    // Server time of the most recent event; see `TableInfo.lastActivity`.
+    lastActivity : Timestamp;
     phase : Phase;
     level : Level;
     trump : ?Suit;

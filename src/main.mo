@@ -885,6 +885,7 @@ persistent actor {
       dealNo = 0;
       epoch = 1;
       endingTime = 0;
+      lastActivity = 0;
       phase = #Ended;
       level = 2;
       trump = null;

@@ -298,19 +298,92 @@ module {
     }
   };
 
-  /// Canonical order for a stored play: trumps first, then descending rank,
-  /// then pair key and raw id. Deterministic, so a client's card order never
-  /// leaks into the state or the event log.
+  /// Canonical order for a stored play, matching the client's `sortedHand`:
+  /// all trumps first, then each side suit in the client's colour-alternating
+  /// display order, each group by descending rank, then pair key and raw id.
+  /// Deterministic, so a client's card order never leaks into the state or the
+  /// event log.
   public func sortPlay(cards : [Card], game : Game) : [Card] {
-    Util.sortBy<Card>(cards, func(a, b) = playCompare(a, b, game));
+    let trump = List.empty<Card>();
+    let sides : [List.List<Card>] = [
+      List.empty<Card>(),
+      List.empty<Card>(),
+      List.empty<Card>(),
+      List.empty<Card>(),
+    ];
+    for (c in cards.vals()) {
+      if (isTrump(c, game)) {
+        trump.add(c);
+      } else {
+        switch (suitOf(c)) {
+          case (?s) { sides[s].add(c) };
+          case null { trump.add(c) }; // jokers are trump; defensive only
+        };
+      };
+    };
+    let out = List.empty<Card>();
+    for (c in Util.sortBy<Card>(trump.toArray(), func(a, b) = playCompare(a, b, game)).vals()) {
+      out.add(c);
+    };
+    for (s in sideSuitOrder(game).vals()) {
+      for (c in Util.sortBy<Card>(sides[s].toArray(), func(a, b) = playCompare(a, b, game)).vals()) {
+        out.add(c);
+      };
+    };
+    out.toArray();
   };
 
-  /// Three-way form of `sortPlay`'s order: positive when `a` belongs after
-  /// `b`, negative when before, zero when equal.
+  /// The client's side-suit display order: alternate suit colours (spades and
+  /// clubs are black, hearts and diamonds red), starting with a colour different
+  /// from the trump's. Mirrors `orderSuitGroups` in `frontend/src/helpers.js`.
+  func sideSuitOrder(game : Game) : [Nat] {
+    let trumpSuit : ?Nat = if (game.trump == 5) { null } else { ?(game.trump - 1) };
+    let pending = List.empty<Nat>();
+    var s = 0;
+    while (s < 4) {
+      let isT = switch (trumpSuit) { case (?t) { s == t }; case null { false } };
+      if (not isT) { pending.add(s) };
+      s += 1;
+    };
+    let arr = pending.toArray();
+    let used = VarArray.repeat<Bool>(false, arr.size());
+    let out = List.empty<Nat>();
+    var lastColor : ?Nat = switch (trumpSuit) { case (?t) { ?(t % 2) }; case null { null } };
+    var remaining = arr.size();
+    while (remaining > 0) {
+      var pick : ?Nat = null;
+      var i = 0;
+      while (i < arr.size() and pick == null) {
+        if (not used[i]) {
+          let color = arr[i] % 2;
+          let ok = switch (lastColor) { case (?lc) { color != lc }; case null { true } };
+          if (ok) { pick := ?i };
+        };
+        i += 1;
+      };
+      if (pick == null) {
+        var j = 0;
+        while (j < arr.size() and pick == null) {
+          if (not used[j]) { pick := ?j };
+          j += 1;
+        };
+      };
+      switch (pick) {
+        case (?idx) {
+          used[idx] := true;
+          out.add(arr[idx]);
+          lastColor := ?(arr[idx] % 2);
+          remaining -= 1;
+        };
+        case null { remaining := 0 };
+      };
+    };
+    out.toArray();
+  };
+
+  /// Three-way form of `sortPlay`'s within-group order: positive when `a`
+  /// belongs after `b`, negative when before, zero when equal.
   func playCompare(a : Card, b : Card, game : Game) : Int {
-    let ta = isTrump(a, game);
-    let tb = isTrump(b, game);
-    if (ta != tb) { return if (tb) { 1 } else { -1 } };
     let ra = rankValue(a, game);
     let rb = rankValue(b, game);
     if (ra != rb) { return Util.cmpNat(rb, ra) };

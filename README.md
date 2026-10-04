@@ -51,7 +51,10 @@ an `endingTime` (server time) that every event pushes to `now + 10 minutes`; a
 table at or past it is idle and treated as ended. The lobby hides it and the
 next `createTable`/`joinTable` sweeps it to `Ended`, while clients compare their
 own clock against `endingTime` so a seated player is told the table is over
-without waiting for a sweep. Ended tables are kept for 2 days, then evicted.
+without waiting for a sweep. Each view also carries `lastActivity`, the most
+recent event time, so a client that remembers a table locally can tell a quiet
+table from an active one regardless of the idle window. Ended tables are kept
+for 2 days, then evicted.
 A **private** table (created with `isPrivate`) uses a 48-hour idle window, is
 hidden from the active-tables list so it is reachable only by its invitation
 link, and is not ended merely because no human is seated.

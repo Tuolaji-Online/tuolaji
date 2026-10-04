@@ -18,10 +18,10 @@ module {
   /// input. Tests that exercise a timeout opt in explicitly.
   let noTimeouts : Types.TableConfig = {
     Types.defaultConfig with
-    declareSeconds = null;
-    overrideSeconds = null;
-    burySeconds = null;
-    playSeconds = null;
+    declareSeconds = 0;
+    overrideSeconds = 0;
+    burySeconds = 0;
+    playSeconds = 0;
   };
 
   func principals() : [Principal] {
@@ -325,7 +325,7 @@ module {
 
   func testAutoBury(t : Test.Harness, ps : [Principal]) {
     t.suite("M3 bury deadline");
-    let timed = { noTimeouts with burySeconds = ?1 };
+    let timed = { noTimeouts with burySeconds = 1 };
     let st = seated(timed, ps);
     readyAll(st, ps);
     ignore dealAll(st);
@@ -369,7 +369,7 @@ module {
     let st2 = seated(noTimeouts, ps);
     readyAll(st2, ps);
     ignore dealAll(st2);
-    t.check(st2.buryDeadline == null, "no deadline when burySeconds is null");
+    t.check(st2.buryDeadline == null, "no deadline when burySeconds is 0");
     t.check(not Table.autoBury(st2, 999_999_999_999_999), "null deadline never auto-buries");
     t.check(phaseEq(Table.info(st2).phase, #Burying), "game waits indefinitely for the banker");
   };
@@ -379,7 +379,7 @@ module {
   func testDeclarationWindow(t : Test.Harness, ps : [Principal]) {
     t.suite("M5 declaration window");
     // The post-deal window and the counter-declaration window are distinct.
-    let cfg = { noTimeouts with declareSeconds = ?7; overrideSeconds = ?3 };
+    let cfg = { noTimeouts with declareSeconds = 7; overrideSeconds = 3 };
 
     // Nobody declares: the deal waits out the window, then defaults to NT.
     let st = seated(cfg, ps);
@@ -538,7 +538,7 @@ module {
 
   func testWindowClosed(t : Test.Harness, ps : [Principal]) {
     t.suite("M5 declaration window closed");
-    let cfg = { noTimeouts with declareSeconds = ?5; overrideSeconds = ?5 };
+    let cfg = { noTimeouts with declareSeconds = 5; overrideSeconds = 5 };
     let st = seated(cfg, ps);
     readyAll(st, ps);
     // seat 1 holds the ♠2 pair, so the second call would legally override.
@@ -563,7 +563,7 @@ module {
 
   func testDeclarationWindowMidDeal(t : Test.Harness, ps : [Principal]) {
     t.suite("M5 mid-deal declaration waits for the deck end");
-    let cfg = { noTimeouts with declareSeconds = ?7; overrideSeconds = ?3 };
+    let cfg = { noTimeouts with declareSeconds = 7; overrideSeconds = 3 };
 
     // A call made while cards are still being dealt arms no countdown; the
     // deck end opens the shorter override window for it.
@@ -613,7 +613,7 @@ module {
 
   func testTerminalDeclaration(t : Test.Harness, ps : [Principal]) {
     t.suite("M5 unanswerable declaration skips the window");
-    let cfg = { noTimeouts with declareSeconds = ?5; overrideSeconds = ?5 };
+    let cfg = { noTimeouts with declareSeconds = 5; overrideSeconds = 5 };
     // seat 1 holds both small jokers, seat 3 both big jokers.
     let jokerDeck = [(0, 105), (4, 107), (2, 106), (6, 108)];
 
@@ -674,7 +674,7 @@ module {
 
   func testEventRetention(t : Test.Harness, ps : [Principal]) {
     t.suite("M5 event retention");
-    let cfg = { noTimeouts with eventRetentionSeconds = ?100 };
+    let cfg = { noTimeouts with eventRetentionSeconds = 100 };
     let st = Table.new(0, cfg, ps[0], 0);
     ignore Table.joinTable(st, ps[1], 1, 0);
     ignore Table.joinTable(st, ps[2], 2, 0);

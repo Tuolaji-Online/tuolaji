@@ -13,9 +13,9 @@ module {
 
   let noTimeouts : Types.TableConfig = {
     Types.defaultConfig with
-    declareSeconds = null;
-    burySeconds = null;
-    playSeconds = null;
+    declareSeconds = 0;
+    burySeconds = 0;
+    playSeconds = 0;
   };
 
   func principals() : [Principal] {

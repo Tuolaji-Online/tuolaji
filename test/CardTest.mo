@@ -200,6 +200,20 @@ module {
     t.equalNat(s3[0], trump, "sortPlay is idempotent (trump first)");
     t.equalNat(s3[1], sideA, "sortPlay is idempotent (rank order)");
     t.equalNat(s3[2], side3, "sortPlay is idempotent (tail)");
+
+    // Mixed suits follow the client's `sortedHand` order: all trumps first, then
+    // each side suit in the colour-alternating display order, each group by
+    // descending rank. For hearts trump the side order is spades, diamonds,
+    // clubs.
+    let h5 = Card.makeId(1, Card.HEARTS, 5);
+    let d3 = Card.makeId(1, Card.DIAMONDS, 3);
+    let c4 = Card.makeId(1, Card.CLUBS, 4);
+    let mixed = Card.sortPlay([c4, d3, side3, sideA, h5], game);
+    t.equalNat(mixed[0], h5, "trumps sort first");
+    t.equalNat(mixed[1], sideA, "the spade group leads the sides");
+    t.equalNat(mixed[2], side3, "same-suit spades stay grouped");
+    t.equalNat(mixed[3], d3, "diamonds follow spades");
+    t.equalNat(mixed[4], c4, "clubs sort last");
   };
 
   public func run(t : Test.Harness) {

@@ -889,9 +889,12 @@ module {
   /// always gets a deadline so the timer keeps the deal moving.
   func startTurn(st : State, seat : Types.Seat, now : Types.Timestamp) {
     st.nextSeat := seat;
-    st.deadline := switch (st.cfg.playSeconds) {
-      case (?s) { ?(now + secondsToNanos(s)) };
-      case null { if (st.seats[seat] == null) { ?(now + EMPTY_SEAT_NANOS) } else { null } };
+    st.deadline := if (st.cfg.playSeconds > 0) {
+      ?(now + secondsToNanos(st.cfg.playSeconds))
+    } else if (st.seats[seat] == null) {
+      ?(now + EMPTY_SEAT_NANOS)
+    } else {
+      null
     };
   };
 
@@ -899,26 +902,25 @@ module {
   /// later, so an early declaration cannot shorten the initial
   /// `declareSeconds` window, and every declaration still guarantees at least
   /// `overrideSeconds` from the call.
-  func armDeclareDeadline(st : State, seconds : ?Nat, now : Types.Timestamp) {
-    switch (seconds) {
-      case (?s) {
-        let proposed = now + secondsToNanos(s);
-        switch (st.declareDeadline) {
-          case (?cur) {
-            if (proposed > cur) {
-              st.declareDeadline := ?proposed;
-              st.declareTotal := ?s;
-            };
-          };
-          case null {
+  func armDeclareDeadline(st : State, seconds : Nat, now : Types.Timestamp) {
+    if (seconds == 0) {
+      // No window: lock the trump as soon as the deck is out (or immediately
+      // after a call).
+      st.declareDeadline := null;
+      st.declareTotal := null;
+    } else {
+      let proposed = now + secondsToNanos(seconds);
+      switch (st.declareDeadline) {
+        case (?cur) {
+          if (proposed > cur) {
             st.declareDeadline := ?proposed;
-            st.declareTotal := ?s;
+            st.declareTotal := ?seconds;
           };
         };
-      };
-      case null {
-        st.declareDeadline := null;
-        st.declareTotal := null;
+        case null {
+          st.declareDeadline := ?proposed;
+          st.declareTotal := ?seconds;
+        };
       };
     };
   };
@@ -1050,9 +1052,12 @@ module {
     st.declareDeadline := null;
     st.declareTotal := null;
     st.phase := #Burying;
-    st.buryDeadline := switch (st.cfg.burySeconds) {
-      case (?s) { ?(now + secondsToNanos(s)) };
-      case null { if (st.seats[bankerSeat] == null) { ?(now + EMPTY_SEAT_NANOS) } else { null } };
+    st.buryDeadline := if (st.cfg.burySeconds > 0) {
+      ?(now + secondsToNanos(st.cfg.burySeconds))
+    } else if (st.seats[bankerSeat] == null) {
+      ?(now + EMPTY_SEAT_NANOS)
+    } else {
+      null
     };
     st.deadline := st.buryDeadline;
     ignore append(st, now, #KittyReceived({ dealer = bankerSeat; count = 8 }));
@@ -1629,10 +1634,8 @@ module {
   /// Drop events older than the configured retention window. The full
   /// history is kept for the retention period; nothing is trimmed by count.
   public func prune(st : State, now : Types.Timestamp) {
-    let retention = switch (st.cfg.eventRetentionSeconds) {
-      case null { return };
-      case (?s) { secondsToNanos(s) };
-    };
+    // Retention is validated positive, so the log is always bounded.
+    let retention = secondsToNanos(st.cfg.eventRetentionSeconds);
     let cutoff = now - retention;
     // Events are appended in time order, so the first one decides.
     switch (st.log.first()) {
@@ -1909,6 +1912,11 @@ module {
         case null { st.teamEpoch[bankTeamOf(st)] };
       };
       endingTime = st.endingTime;
+      // The last event time, independent of the idle window: `endingTime` is
+      // always `lastActivity + window`, so this recovers it without a new
+      // stable field. A client uses it to tell a quiet table from an active
+      // one regardless of the 10-minute / 48-hour window.
+      lastActivity = st.endingTime - idleRetention(isPrivate(st));
       phase = st.phase;
       level = st.level;
       trump = st.trump;
@@ -2023,6 +2031,8 @@ module {
       // one the lobby should show.
       epoch = st.teamEpoch[bankTeamOf(st)];
       endingTime = st.endingTime;
+      // See `viewWithClient`: recover the last event time from `endingTime`.
+      lastActivity = st.endingTime - idleRetention(isPrivate(st));
       // A truly empty seat makes a table joinable; in `#Scoring` the next
       // deal has not started, so a seat that emptied mid-deal can be refilled.
       // A private table is joinable in any live phase, so an invitation link

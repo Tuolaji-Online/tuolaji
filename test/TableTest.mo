@@ -466,7 +466,7 @@ module {
 
     // An empty log (everything pruned) counts as idle.
     let st2 = fresh(ps);
-    st2.cfg := { Types.defaultConfig with eventRetentionSeconds = ?1 };
+    st2.cfg := { Types.defaultConfig with eventRetentionSeconds = 1 };
     Table.prune(st2, idleAt * 2);
     t.check(List.size(st2.log) == 0, "the log is empty after pruning");
     t.check(Table.isIdle(st2, idleAt * 2), "an empty log is idle");
@@ -490,6 +490,9 @@ module {
       st4.endingTime == 12345 + Table.IDLE_RETENTION_NANOS,
       "an event extends endingTime",
     );
+    // `lastActivity` is the event time itself, recovered from the idle window.
+    t.check(Table.info(st4).lastActivity == 12345, "info exposes lastActivity");
+    t.check(Table.view(st4, ps[0]).lastActivity == 12345, "the player view exposes lastActivity");
   };
 
   func testPrivate(t : Test.Harness, ps : [Principal]) {
@@ -509,6 +512,9 @@ module {
       st2.endingTime == 12345 + Table.PRIVATE_IDLE_RETENTION_NANOS,
       "an event extends a private table's endingTime by 48h",
     );
+    // A private table's window is 48h, so `lastActivity` is what a client must
+    // use to tell a quiet table from an active one.
+    t.check(Table.view(st2, ps[0]).lastActivity == 12345, "a private view exposes lastActivity");
     // A private table never ends for want of humans, and emptying out does not
     // end it either — an invitee may still arrive.
     let isBot = func(_p : Principal) : Bool { true };
@@ -537,20 +543,21 @@ module {
     t.suite("M2 config validation");
     t.check(Types.validConfig(Types.defaultConfig), "the default config is valid");
     // The declaration windows are the requested 15s post-deal / 10s override.
-    t.check(Types.defaultConfig.declareSeconds == ?15, "default post-deal window is 15s");
-    t.check(Types.defaultConfig.overrideSeconds == ?10, "default override window is 10s");
+    t.check(Types.defaultConfig.declareSeconds == 15, "default post-deal window is 15s");
+    t.check(Types.defaultConfig.overrideSeconds == 10, "default override window is 10s");
     // Out-of-range / absurd fields are rejected.
     t.check(not Types.validConfig({ Types.defaultConfig with targetLevel = 1 }), "targetLevel 1 rejected");
     t.check(not Types.validConfig({ Types.defaultConfig with targetLevel = 15 }), "targetLevel 15 rejected");
     t.check(not Types.validConfig({ Types.defaultConfig with firstDealer = 4 }), "firstDealer 4 rejected");
     t.check(not Types.validConfig({ Types.defaultConfig with dealTickSeconds = 3601 }), "huge dealTick rejected");
-    t.check(not Types.validConfig({ Types.defaultConfig with playSeconds = ?86_401 }), "huge playSeconds rejected");
-    t.check(not Types.validConfig({ Types.defaultConfig with overrideSeconds = ?86_401 }), "huge overrideSeconds rejected");
-    t.check(not Types.validConfig({ Types.defaultConfig with eventRetentionSeconds = ?0 }), "zero retention rejected");
-    t.check(not Types.validConfig({ Types.defaultConfig with eventRetentionSeconds = ?2_592_001 }), "huge retention rejected");
-    // Null timers (wait forever / keep forever) are fine.
-    t.check(Types.validConfig({ Types.defaultConfig with playSeconds = null }), "null playSeconds is valid");
-    t.check(Types.validConfig({ Types.defaultConfig with eventRetentionSeconds = null }), "null retention is valid");
+    t.check(not Types.validConfig({ Types.defaultConfig with playSeconds = 86_401 }), "huge playSeconds rejected");
+    t.check(not Types.validConfig({ Types.defaultConfig with overrideSeconds = 86_401 }), "huge overrideSeconds rejected");
+    t.check(not Types.validConfig({ Types.defaultConfig with eventRetentionSeconds = 0 }), "zero retention rejected");
+    t.check(not Types.validConfig({ Types.defaultConfig with eventRetentionSeconds = 2_592_001 }), "huge retention rejected");
+    // Zero disables a game timer (no timeout) and is fine; retention must stay
+    // positive so the event log cannot grow without bound.
+    t.check(Types.validConfig({ Types.defaultConfig with playSeconds = 0 }), "zero playSeconds is valid");
+    t.check(Types.validConfig({ Types.defaultConfig with eventRetentionSeconds = 1 }), "a positive retention is valid");
   };
 
   // ── ending a table that has no humans left ─────────────────────────
