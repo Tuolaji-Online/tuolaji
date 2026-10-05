@@ -237,6 +237,13 @@ module {
     };
   };
 
+  /// The current owner of `seat`, or null when it is empty or out of range.
+  /// Used by the actor to recognise a join that is a hand-over from a bot.
+  public func seatOwnerOf(st : State, seat : Types.Seat) : ?Types.SeatOwner {
+    if (seat >= 4) { return null };
+    st.seats[seat];
+  };
+
   // ── canister client registry ─────────────────────────────────────
 
   /// Index of the seat owned by `(principal, clientId)`, if any.
@@ -693,6 +700,41 @@ module {
             ok(st);
           };
         };
+      };
+    };
+  };
+
+  /// Reassign `seat` from its current owner to `caller`. The seat keeps its
+  /// hand and its place in the deal; only the owner, client id, avatar and
+  /// replaceable flag change. The actor calls this only after the auth code and
+  /// the one-seat rule, and only for a replaceable seat held by the whitelisted
+  /// bot; the bot is told separately to drop its local copy. Emits a
+  /// `PlayerJoined` for the new owner so the deal report records the change.
+  public func takeOverSeat(
+    st : State,
+    caller : Principal,
+    clientId : ?Types.ClientId,
+    seat : Types.Seat,
+    avatar : ?Types.Avatar,
+    replaceable : ?Bool,
+    now : Types.Timestamp,
+  ) : Types.ActionResult {
+    if (seat >= 4) { return err(st, #NotASeat, "invalid seat") };
+    if (st.phase == #Ended) { return err(st, #TableEnded, "table has ended") };
+    if (not validAvatar(avatar)) { return err(st, #InvalidAvatar, "invalid avatar") };
+    switch (st.seats[seat]) {
+      case null { err(st, #NotASeat, "seat is empty") };
+      case (?_) {
+        // Overwriting the owner drops the outgoing owner's push client.
+        st.seats[seat] := ?{ principal = caller; clientId; client = null; takenAt = st.seq; replaceable = replaceableOf(replaceable) };
+        st.ready[seat] := false;
+        st.avatars[seat] := avatar;
+        recordParticipant(st, caller, avatar);
+        // A seat handed over mid-deal keeps playing; the report sees one seat
+        // change hands, exactly as a leave-then-join pair would record it.
+        ignore append(st, now, #PlayerLeft({ seat }));
+        ignore append(st, now, #PlayerJoined({ seat; who = caller; avatar }));
+        ok(st);
       };
     };
   };

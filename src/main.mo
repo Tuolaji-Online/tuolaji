@@ -830,7 +830,40 @@ persistent actor {
             return #err({ seq = Table.seqOf(s); code = #NotWhitelisted; detail = "principal already seated in this table" });
           };
         };
-        let r = Table.joinTableWithClient(s, msg.caller, req.clientId, req.seat, req.avatar, req.replaceable, now);
+        // A caller entitled to the seat may take over a replaceable seat the
+        // whitelisted bot is holding. The auth code and one-seat checks above
+        // already passed, so this is a real hand-over. The game reassigns the
+        // seat here; the bot is then told to drop its local copy, so it never
+        // calls back into `leaveTable`. A join by the bot's own principal is
+        // left to `joinTableWithClient`, which handles re-attaching.
+        let botToDrop = switch (Table.seatOwnerOf(s, req.seat)) {
+          case (?o) {
+            if (
+              Set.contains(botPrincipals, o.principal) and
+              o.replaceable and
+              not Principal.equal(o.principal, msg.caller)
+            ) { ?o.principal } else { null };
+          };
+          case null { null };
+        };
+        let r = switch (botToDrop) {
+          case (?bot) {
+            let taken = Table.takeOverSeat(s, msg.caller, req.clientId, req.seat, req.avatar, req.replaceable, now);
+            switch (taken) {
+              case (#ok(_)) {
+                // One-way: the seat already belongs to the caller, so the bot
+                // only needs to drop its local copy. Never awaited.
+                let b : Types.Bot = actor (Principal.toText(bot));
+                b.handOver({ tableId = req.id; seat = req.seat });
+              };
+              case (#err(_)) {};
+            };
+            taken;
+          };
+          case null {
+            Table.joinTableWithClient(s, msg.caller, req.clientId, req.seat, req.avatar, req.replaceable, now);
+          };
+        };
         switch (r) {
           case (#ok(_)) {
             if (Access.isCanister(msg.caller)) {

@@ -405,12 +405,24 @@ module {
     events : [Event];
   };
 
+  /// A one-way notice from the game canister to a bot: `seat` at `tableId` is
+  /// no longer the bot's - the game has already reassigned it to another
+  /// principal - so the bot should drop its local copy and stop playing it.
+  /// The caller is the bot's active game canister, which the bot checks.
+  public type BotHandOver = {
+    tableId : TableId;
+    seat : Seat;
+  };
+
   /// The interface the game canister calls to push to a bot. A mismatch in this
   /// shape must drop the subscription, never trap the game canister.
   /// Note that it's return type is () instead of async () because this is supposed
   /// to be a best-effort one-way call, and the caller doesn't expect a response.
   public type Bot = actor {
     receive : (Push) -> ();
+    // A seat the game has handed to another principal. One-way: the seat
+    // already belongs to its new owner, so the bot only drops its local copy.
+    handOver : (BotHandOver) -> ();
   };
 
   // ── views ──────────────────────────────────────────────────────────
