@@ -2,6 +2,8 @@
 import Blob "mo:core/Blob";
 import Array "mo:core/Array";
 import Cycles "mo:core/Cycles";
+import Debug "mo:core/Debug";
+import Error "mo:core/Error";
 import List "mo:core/List";
 import Map "mo:core/Map";
 import Nat "mo:core/Nat";
@@ -212,31 +214,41 @@ persistent actor {
   /// The scheduler's single timer callback: run every table whose deadline is
   /// due, then re-arm. The deadline work is synchronous; only the rare
   /// next-deal shuffle seal awaits, after the state is committed.
+  ///
+  /// The wake is guarded, and the re-arm is outside the guard on purpose: this
+  /// is the canister's only timer, so a callback that dies part-way - a rejected
+  /// `raw_rand`, say - would leave nothing armed and every table frozen until
+  /// some ingress happened to touch it. Failing loudly and re-arming beats
+  /// stopping quietly.
   func fire() : async () {
     let now = Time.now();
     tickCount += 1;
     let due = Scheduler.takeDue(sched, now);
-    for (id in due.values()) {
-      switch (find(id)) {
-        case (?s) {
-          ignore Table.dealTick(s, now);
-          ignore Table.checkDealWindow(s, now);
-          ignore Table.autoBury(s, now);
-          ignore Table.autoPlay(s, now);
-          Table.prune(s, now);
-          ignore pushClients(s);
+    try {
+      for (id in due.values()) {
+        switch (find(id)) {
+          case (?s) {
+            ignore Table.dealTick(s, now);
+            ignore Table.checkDealWindow(s, now);
+            ignore Table.autoBury(s, now);
+            ignore Table.autoPlay(s, now);
+            Table.prune(s, now);
+            ignore pushClients(s);
+          };
+          case null {};
         };
-        case null {};
       };
-    };
-    // A due action may have queued the next deal's shuffle; seal it now.
-    for (id in due.values()) {
-      switch (find(id)) {
-        case (?s) {
-          await sealDeal(s);
+      // A due action may have queued the next deal's shuffle; seal it now.
+      for (id in due.values()) {
+        switch (find(id)) {
+          case (?s) {
+            await sealDeal(s);
+          };
+          case null {};
         };
-        case null {};
       };
+    } catch e {
+      Debug.print("game: timer wake failed: " # Error.message(e));
     };
     // Re-derive each due table's next wake and re-arm for the earliest of
     // the rest.

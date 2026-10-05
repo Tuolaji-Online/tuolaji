@@ -692,6 +692,23 @@ module {
     t.equalNat(after.lowWater, 5, "lowWater advances to the oldest retained event");
   };
 
+  /// After a takeover the bank team has flipped, but `st.banker` is still the
+  /// seat that banked the deal that just ended. The view's score must key its
+  /// levels by that seat's team (the same banker the view reports), not by the
+  /// new bank team, or the client's level pills swap until the next deal.
+  func testScoringView(t : Test.Harness, ps : [Principal]) {
+    t.suite("M2 scoring view keeps levels on the reported banker");
+    let st = seated(noTimeouts, ps);
+    st.phase := #Scoring;
+    st.banker := ?0; // team 0 banked the deal that just ended
+    st.bankTeam := ?1; // the attackers won, so the bank flipped to team 1
+    st.teamLevel[0] := 5;
+    st.teamLevel[1] := 3;
+    let score = Table.view(st, ps[0]).score;
+    t.equalNat(score.bankerLevel, 5, "bankerLevel follows the reported banker seat (team 0)");
+    t.equalNat(score.attackerLevel, 3, "attackerLevel is the other team");
+  };
+
   public func run(t : Test.Harness) {
     let ps = principals();
     testShuffle(t);
@@ -707,5 +724,6 @@ module {
     testWindowClosed(t, ps);
     testTerminalDeclaration(t, ps);
     testEventRetention(t, ps);
+    testScoringView(t, ps);
   };
 }

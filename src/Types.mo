@@ -415,6 +415,12 @@ module {
 
   // ── views ──────────────────────────────────────────────────────────
 
+  /// A table's current score. `bankerLevel`/`attackerLevel` are keyed by the
+  /// team of the `PlayerView.banker` seat (the deal's banker, or the
+  /// prospective one while dealing), so a client can map them to a partnership
+  /// with `banker % 2`. After a takeover the bank team has flipped but the view
+  /// still reports the seat that banked the finished deal, so keying by the
+  /// bank team instead would swap the two levels until the next deal.
   public type Score = {
     bankerPoints : Nat;
     attackerPoints : Nat;

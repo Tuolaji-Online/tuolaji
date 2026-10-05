@@ -1902,6 +1902,21 @@ module {
   public func viewWithClient(st : State, caller : Principal, clientId : ?Types.ClientId) : Types.PlayerView {
     let mySeat = seatOfClient(st, caller, clientId);
     let seats = seatInfos(st);
+    // During dealing the banker is the deterministic prospect; otherwise it is
+    // the decided seat (null in the lobby).
+    let banker = switch (st.phase) {
+      case (#Dealing) { prospectiveBanker(st) };
+      case _ { st.banker };
+    };
+    // The score is keyed by the team of the banker this view reports, not by
+    // `bankTeamOf`: after a takeover the bank team has already flipped while
+    // `st.banker` is still the seat that banked the deal that just ended, so
+    // keying by the bank team alone would swap the client's two level pills
+    // until the next deal. Keeping them on the same seat keeps them consistent.
+    let bankerTeam = switch (banker) {
+      case (?b) { b % 2 };
+      case null { bankTeamOf(st) };
+    };
     {
       tableId = st.id;
       dealNo = st.dealNo;
@@ -1928,10 +1943,7 @@ module {
       authCode = switch (mySeat) { case (?_) { st.authCode }; case null { null } };
       // During dealing the banker is the deterministic prospect; otherwise it
       // is the decided seat (null in the lobby).
-      banker = switch (st.phase) {
-        case (#Dealing) { prospectiveBanker(st) };
-        case _ { st.banker };
-      };
+      banker;
       prospectiveBanker = prospectiveBanker(st);
       dealer = st.dealer;
       mySeat;
@@ -1940,8 +1952,8 @@ module {
       score = {
         bankerPoints = st.bankerPoints;
         attackerPoints = st.attackerPoints;
-        bankerLevel = st.teamLevel[bankTeamOf(st)];
-        attackerLevel = st.teamLevel[otherTeam(bankTeamOf(st))];
+        bankerLevel = st.teamLevel[bankerTeam];
+        attackerLevel = st.teamLevel[otherTeam(bankerTeam)];
       };
       actingSeat = switch (st.phase) {
         case (#Burying) { st.banker };
