@@ -269,25 +269,6 @@ module {
   /// Number of distinct pair identities (index range of `pairKeyId`).
   public let PAIR_KEY_COUNT : Nat = 54;
 
-  /// Face identity of a card (suit+rank, or joker), independent of deck.
-  /// Identical to `pairKeyId` for valid IDs, but tolerates out-of-range IDs
-  /// the way `tractor.js:cardToString` does (rank wraps mod 13), so the
-  /// two-deck integrity guard can be exercised with fabricated copies.
-  public func faceKey(id : Card) : Nat {
-    if (isSmallJoker(id)) {
-      52
-    } else if (isBigJoker(id)) {
-      53
-    } else {
-      let n = if (id >= 53 and id <= 104) { Nat.sub(id, 52) } else { id };
-      let m = Nat.sub(n, 1);
-      let suit = m % 4;
-      let cardsIdx = (m / 4 + 1) % 13; // index into ["2","3",...,"A"]
-      let rankIdx = if (cardsIdx == 0) { 12 } else { Nat.sub(cardsIdx, 1) };
-      suit * 13 + rankIdx
-    }
-  };
-
   /// Points contributed by the card: 5 -> 5, 10/K -> 10, else 0.
   public func pointValue(id : Card) : Nat {
     switch (rankOf(id)) {

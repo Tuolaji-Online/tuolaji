@@ -709,9 +709,43 @@ module {
     t.equalNat(score.attackerLevel, 3, "attackerLevel is the other team");
   };
 
+  /// The deal-time deck integrity check. A deck must be a permutation of the 108
+  /// canonical ids, which guarantees at most two cards of any face — the fact the
+  /// pair/tractor decomposition relies on. This replaced a per-follow check that
+  /// blamed the follower for a corrupt deal; see `Follow.checkPlay`.
+  func testDeckIntegrity(t : Test.Harness, ps : [Principal]) {
+    t.suite("M3 deck integrity");
+    t.check(Table.validDeck(Shuffle.newDeck()), "the canonical deck is a permutation");
+
+    let dup = Array.toVarArray<Card.Card>(Shuffle.newDeck());
+    dup[0] := dup[1];
+    t.check(not Table.validDeck(VarArray.toArray(dup)), "a repeated physical card is rejected");
+
+    // A fabricated third copy of a face: an out-of-range id that no real deck
+    // contains, which is what the deal-time integrity check rejects.
+    let third = Array.toVarArray<Card.Card>(Shuffle.newDeck());
+    third[0] := 131;
+    t.check(not Table.validDeck(VarArray.toArray(third)), "an out-of-range card is rejected");
+
+    t.check(not Table.validDeck(Array.sliceToArray<Card.Card>(Shuffle.newDeck(), 0, 107)), "a 107-card deck is rejected");
+
+    // `installDeck` refuses a bad deck rather than dealing it: the shuffle stays
+    // pending, so the table never plays a game the rules cannot adjudicate.
+    let st = seated(noTimeouts, ps);
+    readyAll(st, ps);
+    t.check(Table.needsShuffle(st), "a shuffle is pending before install");
+    Table.installDeck(st, Array.sliceToArray<Card.Card>(Shuffle.newDeck(), 0, 107), 0);
+    t.check(Table.needsShuffle(st), "installDeck refuses a deck that is not a permutation");
+    t.check(st.deck.size() == 0, "the refused deck was not installed");
+    // A valid deck still installs and clears the pending shuffle.
+    Table.installDeck(st, Shuffle.newDeck(), 0);
+    t.check(not Table.needsShuffle(st), "a valid deck installs");
+  };
+
   public func run(t : Test.Harness) {
     let ps = principals();
     testShuffle(t);
+    testDeckIntegrity(t, ps);
     testDeal(t, ps);
     testDeclare(t, ps);
     testEnhancedOverride(t, ps);

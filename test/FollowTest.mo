@@ -90,15 +90,12 @@ module {
     expect(t, "no-trump same-suit level pair is legal", true, legal(2, NT, ["♣2", "♣2"], ["♥2", "♦2", "♠2", "♠2"], ["♠2", "♠2"]));
     expect(t, "jokers do not pair with a real pair available", false, legal(2, NT, ["♠2", "♠2"], ["🃟", "🃏", "♣2", "♣2"], ["🃟", "🃏"]));
 
-    // ── two-deck face-value integrity ──
-    let lead9 = CardParse.parse(["♣9", "♣9"]);
-    let hand9 = Array.concat<Card.Card>([CardParse.copyId("♣9", 2)], CardParse.parse(["♥3", "♥4"]));
-    let play9 = CardParse.parse(["♥3", "♥4"]);
-    expect(t, "two-deck: third copy of a lead pair is illegal", false, legalIds(2, H, lead9, hand9, play9));
-    let lead7 = CardParse.parse(["♣7"]);
-    let hand7 = Array.concat<Card.Card>([CardParse.copyId("♣7", 1), CardParse.copyId("♣7", 2)], CardParse.parse(["♥3", "♥4"]));
-    let play7 = CardParse.parse(["♥3", "♥4"]);
-    expect(t, "two-deck: two extra copies of a lead single is illegal", false, legalIds(2, H, lead7, hand7, play7));
+    // ── two real copies of a face ──
+    // Deck integrity (at most two cards of any face) is a property of the deal,
+    // not of a follow: `Table.validDeck` rejects a deck that is not a permutation
+    // of 1..108 when it is installed, rather than failing the follower later for
+    // a hand the deal should never have produced. What is checked here is that
+    // holding the *other* real copy of a face is ordinary and legal.
     let leadO = [CardParse.copyId("♣7", 0)];
     let handO = Array.concat<Card.Card>([CardParse.copyId("♣7", 1)], CardParse.parse(["♣K", "♦4"]));
     let playO = [CardParse.copyId("♣7", 1)];

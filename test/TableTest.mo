@@ -402,8 +402,8 @@ module {
       case (?a) { t.check(a.preset == "cat" and a.style == "ocean", "avatar exposed in TableInfo") };
       case null { t.check(false, "avatar exposed in TableInfo") };
     };
-    // The creator's avatar is also in the event log, so past-table records
-    // (reconstructed from `PlayerJoined`) keep the chosen style.
+    // The creator's avatar is also kept in the participant list, so
+    // past-table records keep the chosen style.
     let participants = Table.info(st).participants;
     t.check(
       participants.size() == 1 and participants[0].avatar == ?{ preset = "cat"; style = "ocean" },
@@ -436,14 +436,55 @@ module {
     // A redundant join refreshes the stored avatar instead of ignoring it.
     let st3 = Table.new(2, Types.defaultConfig, ps[0], 0);
     ignore Table.joinTableWithAvatar(st3, ps[1], 1, ?{ preset = "fox"; style = "neon" }, 0);
-    switch (Table.joinTableWithAvatar(st3, ps[1], 1, ?{ preset = "owl"; style = "berry" }, 0)) {
-      case (#err(e)) { t.check(e.code == #AlreadyJoined, "a redundant join is AlreadyJoined") };
-      case _ { t.check(false, "a redundant join is AlreadyJoined") };
-    };
+    // The refresh is a state change, so it reports success; only a join with
+    // nothing to apply is the `#AlreadyJoined` no-op.
+    t.check(isOk(Table.joinTableWithAvatar(st3, ps[1], 1, ?{ preset = "owl"; style = "berry" }, 0)), "a refreshing redundant join succeeds");
     switch (Table.info(st3).seats[1].avatar) {
       case (?a) { t.check(a.preset == "owl" and a.style == "berry", "the redundant join refreshed the avatar") };
       case null { t.check(false, "the redundant join refreshed the avatar") };
     };
+    // Repeating it changes nothing, so it is the `#AlreadyJoined` no-op and
+    // must leave the seat alone.
+    t.check(
+      isErr(Table.joinTableWithAvatar(st3, ps[1], 1, ?{ preset = "owl"; style = "berry" }, 0), #AlreadyJoined),
+      "a no-op redundant join is AlreadyJoined",
+    );
+    // A client that omits the avatar does not clear the seat's.
+    t.check(isErr(Table.joinTableWithAvatar(st3, ps[1], 1, null, 0), #AlreadyJoined), "a null-avatar redundant join is AlreadyJoined");
+    switch (Table.info(st3).seats[1].avatar) {
+      case (?a) { t.check(a.preset == "owl", "a null avatar leaves the stored avatar alone") };
+      case null { t.check(false, "a null avatar leaves the stored avatar alone") };
+    };
+  };
+
+  func testParticipants(t : Test.Harness, ps : [Principal]) {
+    t.suite("M2 participant tracking");
+    let st = Table.newWithClient(0, Types.defaultConfig, ps[0], null, 0, ?{ preset = "cat"; style = "ocean" }, null);
+    // A new seat records the joiner once.
+    t.check(isOk(Table.joinTableWithAvatar(st, ps[1], 1, ?{ preset = "fox"; style = "neon" }, 0)), "a new seat joins");
+    t.check(Table.info(st).participants.size() == 2, "the joiner is recorded");
+    // A redundant join refreshes the seat avatar (a success, since it changed
+    // state) but must not add a second participant or replace the first
+    // recorded avatar.
+    ignore Table.joinTableWithAvatar(st, ps[1], 1, ?{ preset = "owl"; style = "berry" }, 0);
+    let after = Table.info(st).participants;
+    t.check(after.size() == 2, "a redundant join does not duplicate the participant");
+    var firstKept = false;
+    var replacementSeen = false;
+    for (p in after.vals()) {
+      switch (p.avatar) {
+        case (?a) {
+          if (a.preset == "fox") { firstKept := true };
+          if (a.preset == "owl") { replacementSeen := true };
+        };
+        case null {};
+      };
+    };
+    t.check(firstKept and not replacementSeen, "the first join's avatar is kept");
+    // Leaving keeps the player in the list: the ended-table report wants
+    // everyone who ever took a seat.
+    ignore Table.leave(st, ps[1], null, 0);
+    t.check(Table.info(st).participants.size() == 2, "a departed player stays a participant");
   };
 
   func testIdle(t : Test.Harness, ps : [Principal]) {
@@ -611,6 +652,69 @@ module {
     t.check(found, "the scored deal reveals its shuffle entropy");
   };
 
+  /// The turn and bury deadlines are enforced on the request path, not only by
+  /// the timer: otherwise a client could act in the window between the deadline
+  /// passing and `autoPlay`/`autoBury` running, which is exactly when stalling
+  /// is worth something.
+  func testDeadlineEnforced(t : Test.Harness, ps : [Principal]) {
+    t.suite("M4 deadline enforcement");
+
+    // A play after the turn deadline, and one at it.
+    let late = fresh(ps);
+    Table.debugForce(late, #Playing, ?1, 0);
+    late.hands[0] := [1];
+    late.deadline := ?10;
+    t.check(isErr(Table.play(late, ps[0], [1], 11), #NotYourTurn), "a play past the turn deadline is rejected");
+    let onTime = fresh(ps);
+    Table.debugForce(onTime, #Playing, ?1, 0);
+    onTime.hands[0] := [1];
+    onTime.deadline := ?10;
+    t.check(isOk(Table.play(onTime, ps[0], [1], 10)), "a play exactly at the deadline is accepted");
+    // No deadline (playSeconds = 0) means no gate.
+    let untimed = fresh(ps);
+    Table.debugForce(untimed, #Playing, ?1, 0);
+    untimed.hands[0] := [1];
+    t.check(isOk(Table.play(untimed, ps[0], [1], 999999)), "a play with no armed deadline is not gated");
+
+    // A bury after the kitty deadline, and one at it.
+    let lateBury = fresh(ps);
+    Table.debugForce(lateBury, #Burying, ?1, 0);
+    lateBury.hands[1] := [1, 2, 3, 4, 5, 6, 7, 8, 9];
+    lateBury.buryDeadline := ?10;
+    t.check(isErr(Table.buryKitty(lateBury, ps[1], [1, 2, 3, 4, 5, 6, 7, 8], 11), #WrongPhase), "a bury past the kitty deadline is rejected");
+    let onTimeBury = fresh(ps);
+    Table.debugForce(onTimeBury, #Burying, ?1, 0);
+    onTimeBury.hands[1] := [1, 2, 3, 4, 5, 6, 7, 8, 9];
+    onTimeBury.buryDeadline := ?10;
+    t.check(isOk(Table.buryKitty(onTimeBury, ps[1], [1, 2, 3, 4, 5, 6, 7, 8], 10)), "a bury exactly at the kitty deadline is accepted");
+  };
+
+  /// A seat that emptied mid-deal still holds its cards, and `autoPlay` still
+  /// plays them, so its hand must keep adjudicating throw legality. Excluding it
+  /// would let the leader throw a combination the abandoned hand is about to
+  /// beat, which is the hole the throw rule exists to close.
+  func testDepartedSeatThrow(t : Test.Harness, ps : [Principal]) {
+    t.suite("M4 departed seat adjudicates throws");
+    // Level 2, no trump: ♠3 = 1, ♠4 = 5, ♠5 = 9. Spades are Side(0), so the two
+    // singles sort ♠3 then ♠4 and the first beatable component is ♠3.
+    func penalized(seat3Hand : [Card.Card]) : Bool {
+      let st = fresh(ps);
+      Table.debugForce(st, #Playing, ?1, 0);
+      st.hands[0] := [1, 5, Card.makeId(1, 1, 5)];
+      st.hands[1] := [Card.makeId(1, 1, 6)];
+      st.hands[2] := [Card.makeId(1, 1, 7)];
+      st.hands[3] := seat3Hand;
+      // Seat 3 has left; its hand is kept and auto-played.
+      st.seats[3] := null;
+      switch (Table.play(st, ps[0], [1, 5], 10)) {
+        case (#ok(o)) { o.penalized };
+        case (#err(_)) { false };
+      };
+    };
+    t.check(penalized([9, Card.makeId(1, 1, 8)]), "a throw is penalized when only the departed seat's hand beats it");
+    t.check(not penalized([Card.makeId(1, 1, 8), Card.makeId(1, 1, 9)]), "the same throw is legal when no hand, departed or not, beats it");
+  };
+
   public func run(t : Test.Harness) {
     let ps = principals();
     testCursor(t, ps);
@@ -626,6 +730,9 @@ module {
     testEndWhenAllBots(t, ps);
     testShuffleReveal(t, ps);
     testAvatar(t, ps);
+    testParticipants(t, ps);
+    testDeadlineEnforced(t, ps);
+    testDepartedSeatThrow(t, ps);
     testConfig(t);
   };
 }

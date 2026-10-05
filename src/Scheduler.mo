@@ -60,15 +60,21 @@ module {
     due.toArray();
   };
 
-  /// Cancel any armed timer and install a fresh one-off for the earliest
-  /// queued event (or leave none armed when the queue is empty). Past-due
-  /// entries arm with a zero delay so the callback runs on the next tick.
-  public func arm<system>(st : State, now : Types.Timestamp, job : () -> async ()) {
+  /// Cancel the armed timer, if any. Cancelling an id whose timer has already
+  /// fired is a no-op, which is the usual case once the callback has run.
+  func cancelArmed(st : State) {
     switch (st.timer) {
       case (?id) { Timer.cancelTimer(id) };
       case null {};
     };
     st.timer := null;
+  };
+
+  /// Cancel any armed timer and install a fresh one-off for the earliest
+  /// queued event (or leave none armed when the queue is empty). Past-due
+  /// entries arm with a zero delay so the callback runs on the next tick.
+  public func arm<system>(st : State, now : Types.Timestamp, job : () -> async ()) {
+    cancelArmed(st);
     switch (earliest(st)) {
       case null {};
       case (?at) {
@@ -76,5 +82,22 @@ module {
         st.timer := ?Timer.setTimer<system>(#nanoseconds delay, job);
       };
     };
+  };
+
+  /// Arm a one-off fallback wake `delay` nanoseconds out, replacing whatever was
+  /// armed; `arm` then replaces it with the real schedule. Because `arm`
+  /// installs nothing when the queue is empty, a fallback armed by a wake that
+  /// turns out to need nothing does not survive it, and an idle canister still
+  /// keeps no timer.
+  ///
+  /// This is a best-effort safety net, not a guarantee. It only helps where a
+  /// callback aborts *without* discarding the state change that scheduled it -
+  /// `Scheduler.State` is the caller's own state, so a Wasm trap that rolls the
+  /// call back takes the fallback with it. See `main.fire` for what actually
+  /// recovers that case (a rebuild in `postupgrade`, or the next ingress's
+  /// `touch`).
+  public func armFallback<system>(st : State, delay : Nat, job : () -> async ()) {
+    cancelArmed(st);
+    st.timer := ?Timer.setTimer<system>(#nanoseconds delay, job);
   };
 };

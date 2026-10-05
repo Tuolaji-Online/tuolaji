@@ -52,9 +52,10 @@ module {
   };
 
   /// Physical ID of the k-th copy (0-indexed) of a face value. Copies 0 and 1
-  /// are the two real two-deck cards; copy 2+ is an out-of-range ID that
-  /// `Card.faceKey` still maps to the same face, used to fabricate a
-  /// hypothetical "third copy" for the two-deck integrity guard.
+  /// are the two real two-deck cards; copy 2+ produces an out-of-range id. The
+  /// engine cannot classify such a card (`Card.pairKeyId` and `Card.category`
+  /// index a rank table), which is why `Table.validDeck` refuses a deck
+  /// containing one.
   public func copyId(s : Text, k : Nat) : Card.Card {
     if (s == "🃟") {
       if (k == 0) { 105 } else { 107 };

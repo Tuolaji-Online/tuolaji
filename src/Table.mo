@@ -61,8 +61,30 @@ module {
   /// than any preset/style id) and rejects anything empty or longer.
   public let MAX_AVATAR_FIELD : Nat = 20;
 
+  /// Longest accepted client id, in bytes. The id is a private routing label a
+  /// canister passes so it can hold several seats (a browser passes null), and
+  /// it is persisted on the seat for the life of the table, so it is bounded
+  /// like the avatar rather than trusted at whatever size the ingress allows.
+  public let MAX_CLIENT_ID : Nat = 64;
+
+  /// A valid client id is null (a browser) or at most `MAX_CLIENT_ID` bytes.
+  public func validClientId(id : ?Types.ClientId) : Bool {
+    switch (id) {
+      case null { true };
+      case (?b) { b.size() <= MAX_CLIENT_ID };
+    };
+  };
+
   /// Longest accepted auth code. Short enough to read off an invitation link.
   public let MAX_AUTH_CODE : Nat = 8;
+
+  /// Shortest accepted auth code. The code is a private table's *only* secret,
+  /// and `joinTable` compares it with no throttle, attempt counter, or lockout,
+  /// so its length is the whole defence: the invitation alphabet is base64url
+  /// (64 symbols), hence 8 characters is ~48 bits and anything shorter is
+  /// brute-forceable with free update calls. A code below this minimum is
+  /// rejected at creation rather than trusted later.
+  public let MIN_AUTH_CODE : Nat = 8;
 
   public type State = {
     id : Types.TableId;
@@ -120,6 +142,12 @@ module {
     // keeps a 48-hour idle window and never auto-ends with no humans. A table
     // is private exactly when this is non-null (see `isPrivate`).
     authCode : ?Text;
+    // Every principal that has taken a seat, in join order, with the avatar it
+    // joined with. Maintained incrementally on each join (see
+    // `recordParticipant`) so `infoFor` — and therefore `listTables` — does not
+    // rescan the whole event log. It is append-only: a player who has left
+    // still appears in the ended-table report.
+    var participants : List.List<Types.Participant>;
     // Server time by which the table is idle (no event since
     // `endingTime - idleRetention(id)`) and should be treated as ended.
     // Extended to `now + idleRetention(id)` on every event, so clients can
@@ -193,6 +221,20 @@ module {
       i += 1;
     };
     found;
+  };
+
+  /// True when `seat` is currently held by `who`, whether *claimed* for it (a
+  /// reserved seat still waiting for its principal) or already *attached*. This
+  /// is the table-side half of `Access.maySkipAuthCode`: it tells the actor
+  /// that the join would only attach a seat the table already promised to this
+  /// principal. Out-of-range seats are false rather than a trap, so the actor
+  /// can consult it before `joinTableWithClient` validates the seat.
+  public func seatClaimedBy(st : State, seat : Types.Seat, who : Principal) : Bool {
+    if (seat >= 4) { return false };
+    switch (st.seats[seat]) {
+      case (?o) { Principal.equal(o.principal, who) };
+      case null { false };
+    };
   };
 
   // ── canister client registry ─────────────────────────────────────
@@ -528,12 +570,13 @@ module {
       var kittyRevealed = false;
       var startedAt = now;
       authCode;
+      var participants = List.empty<Types.Participant>();
       var endingTime = now + idleRetention(authCode != null);
       var endedAt = null;
       var lastTrick = null;
     };
-    // Record the creator's avatar in the log so past-table records (which
-    // reconstruct participants from `PlayerJoined`) keep the chosen style.
+    recordParticipant(st, creator, avatar);
+    // Keep the creator's `PlayerJoined` in the log for event consumers.
     ignore append(st, now, #PlayerJoined({ seat = 0; who = creator; avatar }));
     st;
   };
@@ -583,18 +626,35 @@ module {
     if (seat >= 4) { return err(st, #NotASeat, "invalid seat") };
     switch (seatOfClient(st, caller, clientId)) {
       case (?s) {
-        // Already seated under this identity. Accept a refreshed avatar so a
-        // client that took the seat over can set it on its follow-up join, but
-        // still report AlreadyJoined.
-        if (s == seat) {
-          if (not validAvatar(avatar)) { return err(st, #InvalidAvatar, "invalid avatar") };
-          st.avatars[s] := avatar;
-          switch (replaceable) {
-            case (?v) { switch (st.seats[s]) { case (?o) { st.seats[s] := ?{ o with replaceable = v } }; case null {} } };
-            case null {};
+        // Already seated under this identity. A follow-up join may carry a
+        // refreshed avatar or a replaceable hint, so apply one when it is
+        // actually an update — but report that as a success. An `#err` still
+        // never changes state: with nothing to refresh this is a no-op and
+        // answers `#AlreadyJoined`, which is what a client checks for to mean
+        // "I already hold this seat". A null avatar is left alone rather than
+        // clearing the seat, so a client that does not resend its avatar does
+        // not wipe it.
+        if (s != seat) { return err(st, #AlreadyJoined, "already seated") };
+        if (not validAvatar(avatar)) { return err(st, #InvalidAvatar, "invalid avatar") };
+        let refreshedAvatar = switch (avatar) {
+          case null { false };
+          case (?_) { st.avatars[s] != avatar };
+        };
+        let refreshedReplaceable = switch (replaceable) {
+          case null { false };
+          case (?v) {
+            switch (st.seats[s]) { case (?o) { o.replaceable != v }; case null { false } };
           };
         };
-        return err(st, #AlreadyJoined, "already seated");
+        if (not refreshedAvatar and not refreshedReplaceable) {
+          return err(st, #AlreadyJoined, "already seated");
+        };
+        switch (avatar) { case null {}; case (?_) { st.avatars[s] := avatar } };
+        switch (replaceable) {
+          case (?v) { switch (st.seats[s]) { case (?o) { st.seats[s] := ?{ o with replaceable = v } }; case null {} } };
+          case null {};
+        };
+        return ok(st);
       };
       case null {};
     };
@@ -612,6 +672,7 @@ module {
         st.seats[seat] := ?{ principal = caller; clientId; client = null; takenAt = st.seq; replaceable = replaceableOf(replaceable) };
         st.ready[seat] := false;
         st.avatars[seat] := avatar;
+        recordParticipant(st, caller, avatar);
         ignore append(st, now, #PlayerJoined({ seat; who = caller; avatar }));
         ok(st);
       };
@@ -627,6 +688,7 @@ module {
             let flag = switch (replaceable) { case (?v) { v }; case null { o.replaceable } };
             st.seats[seat] := ?{ o with clientId; takenAt = st.seq; replaceable = flag };
             st.avatars[seat] := avatar;
+            recordParticipant(st, caller, avatar);
             ignore append(st, now, #PlayerJoined({ seat; who = caller; avatar }));
             ok(st);
           };
@@ -642,6 +704,10 @@ module {
   /// - `?p`: the seat is claimed for `p` (e.g. the trusted bot principal) and
   ///   the deal keeps playing (the seat's hand is kept), so `p` can attach and
   ///   take over mid-deal. The claim is silent; `p`'s own join announces it.
+  ///   The actor restricts this to a hand-over involving the bot whitelist on
+  ///   one side (`Access.mayReserveSeat`): a seat must never be claimable for an
+  ///   uninvolved principal, because the seat keeps its hidden hand for whoever
+  ///   attaches next.
   /// - `null`: the seat is left open but an in-progress deal keeps playing —
   ///   the timer auto-plays the empty seat, so leaving cannot dodge the deal's
   ///   result. The deal is scored normally; the seat can be rejoined in the
@@ -709,11 +775,18 @@ module {
     };
   };
 
-  /// A valid auth code is null (a public table) or 1..MAX_AUTH_CODE characters.
+  /// A valid auth code is null (a public table) or `MIN_AUTH_CODE`..
+  /// `MAX_AUTH_CODE` characters. Enforcing the lower bound here, at creation,
+  /// is the only place the strength of the secret can be checked: `joinTable`
+  /// just compares what it is given against the stored value, so a weak code
+  /// that slips in can never be repaired.
   public func validAuthCode(code : ?Text) : Bool {
     switch (code) {
       case null { true };
-      case (?c) { let n = Text.size(c); n > 0 and n <= MAX_AUTH_CODE };
+      case (?c) {
+        let n = Text.size(c);
+        n >= MIN_AUTH_CODE and n <= MAX_AUTH_CODE;
+      };
     };
   };
 
@@ -781,6 +854,38 @@ module {
   /// `#Ended` by the next registry change.
   public func isOver(st : State, now : Types.Timestamp) : Bool {
     isIdle(st, now);
+  };
+
+  /// May `caller` read this table's state? A public table is open to anyone
+  /// (spectating is a feature). While it is *live*, a private table is for its
+  /// members: a principal holding one of its seats, or a request that carries
+  /// the table's own auth code - the invitee following a link, who must see the
+  /// seat layout before taking a seat. Without this the sequential table id was
+  /// the only thing guarding a private game.
+  ///
+  /// Once the table is over, a private table is public. Its record and history
+  /// join the ended listings that `listTables` shows to everybody (see its
+  /// `showEnded` clause, which deliberately bypasses the privacy filter), so the
+  /// detail endpoints have to open a row the lobby already lists. Nothing secret
+  /// survives the last deal - every card went out in `#KittyRevealed` - and
+  /// `infoFor` still withholds the auth code from a non-member.
+  ///
+  /// `isOver` is the same predicate the listing uses to bucket a table as
+  /// finished, so a row is openable from the moment it appears rather than only
+  /// after some later ingress happens to sweep it to `#Ended`.
+  public func mayRead(
+    st : State,
+    caller : Principal,
+    authCode : ?Text,
+    now : Types.Timestamp,
+  ) : Bool {
+    if (not isPrivate(st)) { return true };
+    if (st.phase == #Ended or isOver(st, now)) { return true };
+    if (principalHasSeat(st, caller)) { return true };
+    switch (authCode) {
+      case null { false };
+      case (?code) { st.authCode == ?code };
+    };
   };
 
   /// End a table that has gone idle. Returns true when it was ended.
@@ -934,10 +1039,36 @@ module {
     installDeck(st, Shuffle.shuffleWithEntropy(Shuffle.newDeck(), entropy), now);
   };
 
+  /// True when `deck` is a permutation of the 108 canonical card ids. This is the
+  /// deal-time integrity check the rule engine depends on: every face has exactly
+  /// two ids, so a permutation guarantees at most two cards per face, which is
+  /// what `Combo.getPairInfos` and the pair/tractor decomposition assume. It is
+  /// checked once when the deck is installed instead of on every follow (see
+  /// `Follow.checkPlay`), where a corrupt deal used to be reported as the
+  /// follower's fault.
+  public func validDeck(deck : [Card.Card]) : Bool {
+    if (deck.size() != 108) { return false };
+    let seen = VarArray.repeat(false, 109);
+    for (c in deck.vals()) {
+      if (not Card.isValidId(c) or seen[c]) { return false };
+      seen[c] := true;
+    };
+    true;
+  };
+
   /// Install an explicit deck (tests / deterministic replay) and emit
-  /// `DealStarted` followed by the first dealing packet.
+  /// `DealStarted` followed by the first dealing packet. A deck that is not a
+  /// permutation of 1..108 is refused rather than dealt, leaving the shuffle
+  /// pending so the failure is visible instead of producing a game the rules
+  /// cannot adjudicate.
   public func installDeck(st : State, deck : [Card.Card], now : Types.Timestamp) {
     if (not needsShuffle(st)) { return };
+    if (not validDeck(deck)) {
+      Debug.print(
+        "tractor: table " # Nat.toText(st.id) # " refused a deck that is not a permutation of 1..108"
+      );
+      return;
+    };
     st.deck := deck;
     st.dealIdx := 0;
     st.nextDealAt := null;
@@ -1190,6 +1321,13 @@ module {
           case (?b) { if (b != s) { return err(st, #NotKittyOwner, "not the banker") } };
           case null { return err(st, #NotKittyOwner, "no banker") };
         };
+        // Same reasoning as `playWithClient`: `autoBury` fires on this deadline,
+        // so accepting a bury after it passed would hand the banker free time in
+        // exactly the window where the server is about to act for them.
+        switch (st.buryDeadline) {
+          case (?d) { if (now > d) { return err(st, #WrongPhase, "bury deadline passed") } };
+          case null {};
+        };
         if (cards.size() != 8) { return err(st, #KittySizeMismatch, "must bury 8 cards") };
         if (Card.hasDuplicate(cards)) { return err(st, #DuplicateCard, "duplicate buried card") };
         for (c in cards.vals()) {
@@ -1219,6 +1357,17 @@ module {
 
   // ── play ───────────────────────────────────────────────────────────
 
+  /// The three hands that can answer a lead from `seat`, for the throw
+  /// unbeatability check (RULES.md §9: "no other player holds a same-suit
+  /// combination that beats any of its components").
+  ///
+  /// A seat whose owner has left is deliberately included: leaving keeps the
+  /// hand (see `leaveWithClient`), the cards are still dealt in, and the timer
+  /// goes on playing them. They can therefore beat a throw exactly as a present
+  /// player's can, so dropping such a hand would let the leader throw a
+  /// combination the abandoned hand is about to beat — the hole the rule exists
+  /// to close. What matters is the cards still in play, not who is sitting
+  /// behind them.
   func otherHands(st : State, seat : Types.Seat) : [[Card.Card]] {
     let out = List.empty<[Card.Card]>();
     var i = 0;
@@ -1527,6 +1676,17 @@ module {
           return err(st, #WrongPhase, "declaration window still open");
         };
         if (st.nextSeat != s) { return err(st, #NotYourTurn, "not your turn") };
+        // The deadline is the server's, and `autoPlay` fires on it. Without this
+        // check a client could still act in the window between the deadline
+        // passing and the timer callback running, which is exactly the moment it
+        // is worth stalling for. `#NotYourTurn` is the right answer because the
+        // turn is about to move on without the caller, and clients already treat
+        // it that way (they drop the play and let the next poll show the
+        // auto-play).
+        switch (st.deadline) {
+          case (?d) { if (now > d) { return err(st, #NotYourTurn, "turn deadline passed") } };
+          case null {};
+        };
         if (cards.size() == 0) { return err(st, #InvalidCard, "empty play") };
         if (Card.hasDuplicate(cards)) { return err(st, #DuplicateCard, "duplicate cards in play") };
         applyPlay(st, s, cards, now, false);
@@ -1736,22 +1896,16 @@ module {
     out.toArray();
   };
 
-  /// Distinct principals that have taken a seat, in join order, with the avatar
-  /// they joined with. Reconstructed from the retained `PlayerJoined` events;
-  /// a table whose log has been pruned is not offered for an ended-table report.
-  func participantList(st : State) : [Types.Participant] {
-    let out = List.empty<Types.Participant>();
-    for (e in st.log.values()) {
-      switch (e.body) {
-        case (#PlayerJoined(p)) {
-          var seen = false;
-          for (q in out.values()) { if (Principal.equal(q.principal, p.who)) { seen := true } };
-          if (not seen) { out.add({ principal = p.who; avatar = p.avatar }) };
-        };
-        case _ {};
-      };
+  /// Add `principal` to the participant list the first time it takes a seat,
+  /// remembering the avatar it joined with. Called from every join path, so the
+  /// list is maintained incrementally instead of being rebuilt from the event
+  /// log on every `infoFor`. A later join by the same principal keeps the first
+  /// avatar.
+  func recordParticipant(st : State, principal : Principal, avatar : ?Types.Avatar) {
+    for (p in st.participants.values()) {
+      if (Principal.equal(p.principal, principal)) { return };
     };
-    out.toArray();
+    st.participants.add({ principal; avatar });
   };
 
   /// True once the event log has been trimmed, so its history is incomplete.
@@ -2002,10 +2156,14 @@ module {
     let maxEvents : Nat = 512;
     var count = 0;
     let events = List.empty<Types.Event>();
-    for (e in st.log.values()) {
+    label scan for (e in st.log.values()) {
       if (e.seq > afterSeq and isVisible(st, caller, clientId, e)) {
         count += 1;
-        if (count <= maxEvents) { events.add(e) };
+        // Stop as soon as the cap is exceeded: the events are discarded in that
+        // case anyway (`fullSync`), so there is no reason to keep walking a long
+        // retained log just to count what will be thrown away.
+        if (count > maxEvents) { break scan };
+        events.add(e);
       };
     };
     let truncated = count > maxEvents;
@@ -2062,7 +2220,7 @@ module {
         case (?t) { ?t };
         case null { switch (st.log.last()) { case (?e) { ?e.at }; case null { null } } };
       };
-      participants = participantList(st);
+      participants = st.participants.toArray();
     };
   };
 

@@ -477,10 +477,17 @@ module {
     cycleBalance : Nat;
   };
 
+  /// Reads of a *live* private table are for its members. `authCode` is the
+  /// escape hatch for a reader who holds the invitation secret but not (yet) a
+  /// seat: the invitee opening a link, who must see the seat layout before
+  /// joining. Presenting a seated principal's own seat is enough, so a client
+  /// that is already seated may leave it null. An ended private table is public
+  /// and needs neither (see `Table.mayRead`).
   public type PollRequest = {
     tableId : TableId;
     afterSeq : Seq;
     clientId : ?ClientId;
+    authCode : ?Text;
   };
 
   public type PollResponse = {
@@ -561,10 +568,22 @@ module {
   public type GetPlayHistoryRequest = {
     id : TableId;
     trickId : ?Nat;
+    // See `PollRequest.authCode`.
+    authCode : ?Text;
   };
 
   public type GetTableHistoryRequest = {
     id : TableId;
+    // See `PollRequest.authCode`.
+    authCode : ?Text;
+  };
+
+  /// `getTable` request. A record (rather than a bare id) so a private table's
+  /// invitee can present the code and read the seat layout before joining.
+  public type GetTableRequest = {
+    id : TableId;
+    // See `PollRequest.authCode`.
+    authCode : ?Text;
   };
 
   /// A table's full history for the lobby's ended-table detail dialog: the
@@ -595,7 +614,10 @@ module {
     // a human. Omitted by human clients (defaults to false).
     replaceable : ?Bool;
     // The private table's auth code (from the invitation link). Must equal the
-    // table's own value; a public table has null and so must this.
+    // table's own value; a public table has null and so must this. The only
+    // caller exempt from presenting it is the whitelisted bot, and only when it
+    // attaches a seat already claimed for it by `createTable.reserved` or
+    // `leaveTable.reserveFor`.
     authCode : ?Text;
   };
 
@@ -606,9 +628,14 @@ module {
 
   public type LeaveTableRequest = {
     id : TableId;
-    // null leaves the seat open (an in-progress deal is abandoned); `?p` claims
-    // the vacated seat for `p`, who then attaches to it. `p` may be the trusted
-    // bot principal (taking over) or a human (replacing the seat).
+    // null leaves the seat open (an in-progress deal keeps playing, auto-played
+    // by the timer); `?p` claims the vacated seat for `p`, who then attaches to
+    // it. A hand-over must involve the bot whitelist on one side: either the
+    // caller is the trusted bot passing on its own seat, or `p` is the bot and
+    // an ordinary seat is being handed over so the deal carries on. Naming an
+    // uninvolved third party is rejected `#NotWhitelisted` — the target never
+    // consented, whoever attaches next would read that seat's whole remaining
+    // hand, and an unfilled claim stops the table starting.
     reserveFor : ?Principal;
     clientId : ?ClientId;
   };

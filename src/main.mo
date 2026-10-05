@@ -22,7 +22,10 @@ import Types "Types";
 
 // The retired stable variables (the constants, `botPrincipals`, `sched`) are
 // `transient`; a one-time migration already dropped them from the deployed
-// signature, so no migration is needed here any more.
+// signature, so no migration is needed here any more. The same is true of the
+// `participants` migration that seeded `Table.State.participants` from the
+// event log: the deployed canister now carries the field, so the migration has
+// been removed and a fresh install can self-upgrade again.
 persistent actor {
   // ── Reentrancy discipline ──────────────────────────────────────────
   // Every ingress reads and mutates its table synchronously. The only
@@ -211,21 +214,52 @@ persistent actor {
     };
   };
 
+  /// Fallback wake for the scheduler's single timer callback, armed by `fire`
+  /// before it runs any table's deadline work. See `fire`.
+  transient let WAKE_FALLBACK_NANOS : Nat = 5_000_000_000; // 5 seconds
+
   /// The scheduler's single timer callback: run every table whose deadline is
   /// due, then re-arm. The deadline work is synchronous; only the rare
   /// next-deal shuffle seal awaits, after the state is committed.
   ///
-  /// The wake is guarded, and the re-arm is outside the guard on purpose: this
-  /// is the canister's only timer, so a callback that dies part-way - a rejected
-  /// `raw_rand`, say - would leave nothing armed and every table frozen until
-  /// some ingress happened to touch it. Failing loudly and re-arming beats
-  /// stopping quietly.
+  /// Failure handling here has to be described exactly, because this is the only
+  /// thing that advances a table on its own and there are two ways a callback
+  /// can die.
+  ///
+  /// 1. *A rejected future* - a failed `raw_rand`, a failed inter-canister call.
+  ///    `try/catch` catches these. The guard is per table, so the tables queued
+  ///    behind the failure still run, and the final re-arm (outside every guard)
+  ///    installs the real schedule. On the happy path that re-arm cancels the
+  ///    fallback and installs the true earliest wake, or nothing at all when no
+  ///    table needs one, so an idle canister still keeps no timer. This is the
+  ///    common failure and it is fully handled in-process.
+  ///
+  /// 2. *A Wasm trap* - a bad index, a failed assertion. A trap is not
+  ///    catchable by Motoko `try/catch`, and the IC discards the entire call,
+  ///    its state changes included. That also discards the fallback wake armed
+  ///    below, because a Motoko timer registration is part of the canister's own
+  ///    state and is rolled back with everything else. Do not read the fallback
+  ///    as covering this case: it is armed as a safety net in case the platform
+  ///    ever preserves a wake scheduled by a call that aborts, not as a
+  ///    guarantee. What actually recovers a trap is outside this function: the
+  ///    schedule is rebuilt from `tables` in `postupgrade`, and any ingress calls
+  ///    `touch`, which re-derives `nextTimer` and re-arms. Until one of those
+  ///    happens, no table has a wake. A trap here is therefore a bug to fix, not
+  ///    a condition to absorb - the per-table guards above do not pretend
+  ///    otherwise.
+  ///
+  /// The fallback interval matches `Table.AUTO_RETRY_NANOS`, the same "retry
+  /// loudly rather than stop quietly" policy the stuck auto-play already follows:
+  /// a wake that keeps failing is an operator problem, but it announces itself
+  /// in the logs instead of looking like an idle canister.
   func fire() : async () {
     let now = Time.now();
     tickCount += 1;
     let due = Scheduler.takeDue(sched, now);
-    try {
-      for (id in due.values()) {
+    // Queue the safety-net wake before touching any table state.
+    Scheduler.armFallback<system>(sched, WAKE_FALLBACK_NANOS, fire);
+    for (id in due.values()) {
+      try {
         switch (find(id)) {
           case (?s) {
             ignore Table.dealTick(s, now);
@@ -237,25 +271,50 @@ persistent actor {
           };
           case null {};
         };
+      } catch e {
+        Debug.print(
+          "game: deadline work failed for table " # Nat.toText(id) # ": "
+          # Error.message(e)
+        );
       };
-      // A due action may have queued the next deal's shuffle; seal it now.
-      for (id in due.values()) {
+    };
+    // A due action may have queued the next deal's shuffle; seal it now. Guarded
+    // per table as well: one rejected `raw_rand` must not strand the others.
+    let sealFailed = Set.empty<Types.TableId>();
+    for (id in due.values()) {
+      try {
         switch (find(id)) {
           case (?s) {
             await sealDeal(s);
           };
           case null {};
         };
+      } catch e {
+        Set.add(sealFailed, id);
+        Debug.print(
+          "game: shuffle seal failed for table " # Nat.toText(id) # ": "
+          # Error.message(e)
+        );
       };
-    } catch e {
-      Debug.print("game: timer wake failed: " # Error.message(e));
     };
     // Re-derive each due table's next wake and re-arm for the earliest of
-    // the rest.
+    // the rest, replacing the fallback wake.
     let after = Time.now();
     for (id in due.values()) {
       switch (find(id)) {
-        case (?s) { reschedule(s, after) };
+        case (?s) {
+          reschedule(s, after);
+          // A table whose seal just failed still owes a shuffle, and
+          // `nextTimer` reports that as "now" so the deal can start as soon as
+          // entropy arrives. Re-arming at zero delay would instead spin the one
+          // timer as fast as blocks arrive while `raw_rand` keeps rejecting, so
+          // push the retry out by the same backoff a stuck auto-play uses. The
+          // next attempt is still triggered immediately by any ingress, because
+          // `touch` re-runs `reschedule`.
+          if (Set.contains(sealFailed, id) and Table.needsShuffle(s)) {
+            Scheduler.upsert(sched, id, after + Table.AUTO_RETRY_NANOS);
+          };
+        };
         case null {};
       };
     };
@@ -291,6 +350,21 @@ persistent actor {
 
   func find(id : Types.TableId) : ?Table.State {
     Map.get(tables, id);
+  };
+
+  /// The poll response for a table the caller may not see. Deliberately the
+  /// same shape as an unknown table, so a refused read never confirms that a
+  /// private table exists at that id.
+  func noTable(id : Types.TableId) : Types.PollResponse {
+    {
+      tableId = id;
+      seq = 0;
+      lowWater = 1;
+      fullSync = true;
+      phase = #Ended;
+      events = [];
+      view = emptyView(id);
+    };
   };
 
   func notFound() : Types.ActionResult {
@@ -469,8 +543,14 @@ persistent actor {
     if (isPrivate and not hasOpenSeat(req.reserved)) {
       return #err({ code = #PrivateNeedsOpenSeat; detail = "a private table needs at least one open seat" });
     };
+    // The auth code is the table's only secret and joining is not throttled, so
+    // the length is enforced here rather than left to the client (see
+    // `Table.MIN_AUTH_CODE`).
     if (not Table.validAuthCode(req.authCode)) {
-      return #err({ code = #InvalidAuthCode; detail = "invalid auth code" });
+      return #err({
+        code = #InvalidAuthCode;
+        detail = "auth code must be " # Nat.toText(Table.MIN_AUTH_CODE) # ".." # Nat.toText(Table.MAX_AUTH_CODE) # " characters";
+      });
     };
     await create(config, req.reserved, req.avatar, req.clientId, req.authCode, msg.caller);
   };
@@ -483,9 +563,16 @@ persistent actor {
     authCode : ?Text,
     caller : Principal,
   ) : async Types.CreateResult {
-    // Validate the caller-supplied avatar before touching any state.
+    // Validate the caller-supplied avatar and client id before touching any
+    // state: both are persisted on the seat for the life of the table.
     if (not Table.validAvatar(avatar)) {
       return #err({ code = #InvalidAvatar; detail = "invalid avatar" });
+    };
+    if (not Table.validClientId(clientId)) {
+      return #err({
+        code = #PayloadTooLarge;
+        detail = "client id must be at most " # Nat.toText(Table.MAX_CLIENT_ID) # " bytes";
+      });
     };
     // A non-bot principal may hold at most one seat; reject a reservation set
     // that claims one twice before allocating a table.
@@ -558,7 +645,9 @@ persistent actor {
             // A private table is hidden from the live listing, except to a
             // principal who already holds a seat in it (so their other devices
             // can find it and re-enter). It still appears in the ended listing
-            // once it is over.
+            // once it is over: an ended private table is public, which is the
+            // same rule `mayRead` applies to the detail endpoints, so every row
+            // this lists is a row they can actually open.
             let mine = info.isPrivate and Table.principalHasSeat(s, msg.caller);
             if ((live or showEnded) and (showEnded or not info.isPrivate or mine) and phaseOk and (showEnded or info.phase != #Ended) and (not filter.joinableOnly or info.joinable) and (not showEnded or reportable)) {
               out.add(info);
@@ -573,28 +662,41 @@ persistent actor {
     out.toArray();
   };
 
-  public query (msg) func getTable(id : Types.TableId) : async ?Types.TableInfo {
-    switch (find(id)) {
-      case (?s) { ?Table.infoFor(s, ?msg.caller) };
+  /// A table's lobby record. Null when the table does not exist *or* the caller
+  /// may not see it (see `Table.mayRead`), so a *live* private table is
+  /// indistinguishable from a missing one. An ended private table is public, so
+  /// its record reads for anyone.
+  public query (msg) func getTable(req : Types.GetTableRequest) : async ?Types.TableInfo {
+    switch (find(req.id)) {
+      case (?s) {
+        if (Table.mayRead(s, msg.caller, req.authCode, Time.now())) { ?Table.infoFor(s, ?msg.caller) } else { null };
+      };
       case null { null };
     };
   };
 
   /// Completed tricks of a table in play order, for replay/analysis. Pass a
-  /// `?trickId` to return only that trick. Null when the table does not exist;
+  /// `?trickId` to return only that trick. Null when the table does not exist or
+  /// the caller may not see a still-live private table (see `Table.mayRead`);
   /// only tricks still inside the table's event retention window are returned.
-  public query func getPlayHistory(req : Types.GetPlayHistoryRequest) : async ?[Types.PlaySequence] {
+  public query (msg) func getPlayHistory(req : Types.GetPlayHistoryRequest) : async ?[Types.PlaySequence] {
     switch (find(req.id)) {
-      case (?s) { ?Table.playHistory(s, req.trickId) };
+      case (?s) {
+        if (Table.mayRead(s, msg.caller, req.authCode, Time.now())) { ?Table.playHistory(s, req.trickId) } else { null };
+      };
       case null { null };
     };
   };
 
   /// A table's stats plus its completed tricks and scored deals, for the
-  /// lobby's ended-table detail dialog. Null when the table does not exist.
-  public query func getTableHistory(req : Types.GetTableHistoryRequest) : async ?Types.TableHistory {
+  /// lobby's ended-table detail dialog. Null when the table does not exist or
+  /// the caller may not see a still-live private table (see `mayRead`) - ended
+  /// tables, private or not, are the whole point of this call.
+  public query (msg) func getTableHistory(req : Types.GetTableHistoryRequest) : async ?Types.TableHistory {
     switch (find(req.id)) {
-      case (?s) { ?Table.history(s) };
+      case (?s) {
+        if (Table.mayRead(s, msg.caller, req.authCode, Time.now())) { ?Table.history(s) } else { null };
+      };
       case null { null };
     };
   };
@@ -692,14 +794,32 @@ persistent actor {
       case (?e) { return #err({ seq = 0; code = e.code; detail = e.detail }) };
       case null {};
     };
+    // The client id is stored on the seat, so bound it here as well as at
+    // `createTable`. See `Table.MAX_CLIENT_ID`.
+    if (not Table.validClientId(req.clientId)) {
+      return #err({
+        seq = 0;
+        code = #PayloadTooLarge;
+        detail = "client id must be at most " # Nat.toText(Table.MAX_CLIENT_ID) # " bytes";
+      });
+    };
     let now = Time.now();
     await sweepIdle(now);
     switch (find(req.id)) {
       case (?s) {
         // A private table's auth code gates joining (a public table has null,
-        // and a join must present null there too). A trusted canister attaches
-        // its reserved seats without it.
-        if (not Access.isCanister(msg.caller) and req.authCode != s.authCode) {
+        // and a join must present null there too). The single bypass is the
+        // whitelisted bot attaching a seat the table already claims for it.
+        // Principal *class* is deliberately not the test: `Access.isCanister`
+        // is true for every opaque-class principal, anyone can deploy a
+        // canister, and every private table must keep a seat open for an
+        // invitee — so class as authority hands every private table to the
+        // first random canister that probes its id.
+        let botAttachesOwnSeat = Access.maySkipAuthCode(
+          Set.contains(botPrincipals, msg.caller),
+          Table.seatClaimedBy(s, req.seat, msg.caller),
+        );
+        if (not botAttachesOwnSeat and req.authCode != s.authCode) {
           return #err({ seq = Table.seqOf(s); code = #InvalidAuthCode; detail = "auth code mismatch" });
         };
         // One seat per principal per table; a second seat needs the bot
@@ -734,13 +854,25 @@ persistent actor {
           case (?e) { return #err({ seq = Table.seqOf(s); code = e.code; detail = e.detail }) };
           case null {};
         };
-        // `reserveFor` claims the vacated seat for another principal: the
-        // trusted bot taking over, or a human replacing the seat. The target
-        // takes the seat under the one-seat-per-table rule, unless it is a
-        // trusted bot (which may hold several).
+        // `reserveFor` claims the vacated seat for another principal. Only two
+        // hand-overs are admissible (below): the trusted bot passing on a seat,
+        // or a seat handed to the bot. A permitted target then takes it under
+        // the one-seat-per-table rule, unless it is a trusted bot (which may
+        // hold several).
         switch (req.reserveFor) {
           case (?p) {
-            if (Table.principalHasSeat(s, p) and not Set.contains(botPrincipals, p)) {
+            // The hand-over must involve the whitelist on one side: the bot
+            // passing on a seat of its own, or an ordinary seat handed to the
+            // bot to keep the deal playing. A seat claimed for an uninvolved
+            // third party is neither: the target never consented, whoever
+            // attaches next reads that seat's whole remaining hand through
+            // `PlayerView.myHand`, and an unfilled claim stops the table ever
+            // starting. Checked before any state changes, so a rejected leave
+            // leaves the seat untouched.
+            if (not Access.mayReserveSeat(isBotPrincipal(msg.caller), isBotPrincipal(p))) {
+              return #err({ seq = Table.seqOf(s); code = #NotWhitelisted; detail = "a seat may only be handed to or by the bot" });
+            };
+            if (Table.principalHasSeat(s, p) and not isBotPrincipal(p)) {
               return #err({ seq = Table.seqOf(s); code = #NotWhitelisted; detail = "target already seated in this table" });
             };
           };
@@ -839,55 +971,64 @@ persistent actor {
 
   public shared query(msg) func poll(req : Types.PollRequest) : async Types.PollResponse {
     switch (find(req.tableId)) {
-      case (?s) { Table.pollWithClient(s, msg.caller, req.clientId, req.afterSeq) };
-      case null {
-        // Return an empty response for an unknown table; clients treat a
-        // missing table separately via getTable/listTables.
-        {
-          tableId = req.tableId;
-          seq = 0;
-          lowWater = 1;
-          fullSync = true;
-          phase = #Ended;
-          events = [];
-          view = emptyView(req.tableId);
-        };
+      // An unknown table, or a private one the caller may not read, gets the
+      // same empty response; clients treat a missing table separately via
+      // getTable/listTables.
+      case (?s) {
+        if (Table.mayRead(s, msg.caller, req.authCode, Time.now())) { Table.pollWithClient(s, msg.caller, req.clientId, req.afterSeq) } else { noTable(req.tableId) };
       };
+      case null { noTable(req.tableId) };
     };
   };
 
   public shared(msg) func sync(req : Types.PollRequest) : async Types.PollResponse {
     switch (find(req.tableId)) {
       case (?s) {
+        if (not Table.mayRead(s, msg.caller, req.authCode, Time.now())) { return noTable(req.tableId) };
+        // Only a principal holding a seat has a cursor worth catching up on.
+        // A spectator reads through `poll`, which is a query and so costs the
+        // canister no consensus; serving the event stream here to a non-member
+        // is what let any authenticated caller force a log scan on the update
+        // path. The view is still returned, because it is exactly the public
+        // state `poll` already answers for free, and a client needs it to render
+        // a table it is watching.
+        if (not Table.principalHasSeat(s, msg.caller)) {
+          return viewOnly(req.tableId, s, msg.caller, req.clientId);
+        };
         switch (chargeClient<system>(s, msg.caller, req.clientId)) {
           case (?_) {
             // Charge failure (unknown client or no cycles): hand back the
             // caller-scoped view with no events, never claim the table ended.
-            return {
-              tableId = req.tableId;
-              seq = Table.seqOf(s);
-              lowWater = 1;
-              fullSync = true;
-              phase = s.phase;
-              events = [];
-              view = Table.viewWithClient(s, msg.caller, req.clientId);
-            };
+            // The caller is seated, so this is not an unauthenticated read; only
+            // the event stream it has not paid for is withheld.
+            return viewOnly(req.tableId, s, msg.caller, req.clientId);
           };
           case null {};
         };
         Table.pollWithClient(s, msg.caller, req.clientId, req.afterSeq);
       };
-      case null {
-        {
-          tableId = req.tableId;
-          seq = 0;
-          lowWater = 1;
-          fullSync = true;
-          phase = #Ended;
-          events = [];
-          view = emptyView(req.tableId);
-        };
-      };
+      case null { noTable(req.tableId) };
+    };
+  };
+
+  /// A `sync` response carrying the caller-scoped view but no events: the answer
+  /// for a caller with no cursor to serve (a spectator) or whose charge to serve
+  /// one failed. Deliberately keeps the table's real `phase`, so a client never
+  /// mistakes a refused read for an ended table.
+  func viewOnly(
+    id : Types.TableId,
+    s : Table.State,
+    caller : Principal,
+    clientId : ?Types.ClientId,
+  ) : Types.PollResponse {
+    {
+      tableId = id;
+      seq = Table.seqOf(s);
+      lowWater = 1;
+      fullSync = true;
+      phase = s.phase;
+      events = [];
+      view = Table.viewWithClient(s, caller, clientId);
     };
   };
 

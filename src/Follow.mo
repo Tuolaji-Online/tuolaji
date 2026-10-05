@@ -3,7 +3,6 @@
 /// Ported from `simulator.js:checkPlay`. Returns null when the follow is
 /// legal, or a `CheckError` describing the violation.
 import Array "mo:core/Array";
-import VarArray "mo:core/VarArray";
 import Card "Card";
 import Combo "Combo";
 import Types "Types";
@@ -39,27 +38,11 @@ module {
       };
     };
 
-    // Two-deck physical constraint: at most two copies of any face value
-    // across lead (not already in hand) and this hand.
-    let fvCount = VarArray.repeat<Nat>(0, Card.PAIR_KEY_COUNT);
-    for (c in leadPlay.vals()) {
-      if (not Card.contains(hand, c)) {
-        let k = Card.faceKey(c);
-        fvCount[k] += 1;
-      };
-    };
-    for (c in hand.vals()) {
-      let k = Card.faceKey(c);
-      fvCount[k] += 1;
-    };
-    var k = 0;
-    while (k < Card.PAIR_KEY_COUNT) {
-      if (fvCount[k] > 2) {
-        return ?{ code = #InvalidCard; detail = "a face value appears more than twice across lead and hand" };
-      };
-      k += 1;
-    };
-
+    // Deck integrity is not checked here. A hand holding a third copy of a face
+    // means the deal was corrupt, and rejecting the *follower* for it punished
+    // the one player who could not fix it (and, on a real deck, could never
+    // happen). `Table.validDeck` rejects such a deck when it is installed, so the
+    // engine only ever adjudicates a permutation of the 108 canonical cards.
     if (play.size() != leadPlay.size()) {
       return ?{ code = #IllegalFollow; detail = "wrong number of cards" };
     };
