@@ -84,7 +84,7 @@ dealt. The cards used must be in the declarer's hand.
   override is enabled.
 - **Joker pair** (对王): two small jokers or two big jokers declare **No-Trump**.
   NT is always final.
-- **Enhanced joker override** (增强对王反主, optional setting): when enabled, a
+- **Joker override** (增强对王反主, optional setting): when enabled, a
   joker pair may override a declared level-card pair. A level-card pair still
   cannot override another pair, and NT remains final.
 - If nobody declares, the deal is **No-Trump**.

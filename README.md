@@ -98,7 +98,7 @@ type Phase = variant { Lobby; Dealing; Burying; Playing; Scoring; Ended };
 service : {
   createTable : (CreateTableRequest) -> (CreateResult);
   listTables  : (TableFilter) -> (vec TableInfo) query;
-  getTable    : (TableId) -> (opt TableInfo) query;
+  getTable    : (GetTableRequest) -> (opt TableInfo) query;
 
   joinTable : (JoinTableRequest) -> (ActionResult);
   leaveTable : (LeaveTableRequest) -> (ActionResult);
@@ -140,14 +140,15 @@ for No-Trump.
 ```candid
 type TableConfig = record {
   targetLevel : Level;             // epoch ladder goal (default 14 = A)
-  dealTickSeconds : nat;           // one card per seat per tick
-  declareSeconds : opt nat;        // post-deal declaration window
-  overrideSeconds : opt nat;       // counter-declaration window after a call
-  burySeconds : opt nat;           // banker timeout
-  playSeconds : opt nat;           // turn timeout -> auto-play
-  eventRetentionSeconds : opt nat; // log retention (default 3 days)
+  dealTickSeconds : nat;           // one card per seat per tick (0 = as fast as the timer)
+  declareSeconds : nat;            // post-deal declaration window (0 = lock at deck end)
+  overrideSeconds : nat;           // counter-declaration window after a call (0 = lock immediately)
+  burySeconds : nat;               // banker timeout (0 = wait indefinitely)
+  playSeconds : nat;               // turn timeout -> auto-play (0 = wait indefinitely)
+  eventRetentionSeconds : nat;     // log retention (default 3 days); must be 1..2592000
   firstDealer : Seat;
   enhancedJokerOverride : bool;
+  hintLevel : Intelligence;        // hint for clients (Low/Mid/High); not enforced server-side
   endWhenAllBots : bool;           // end once no human-owned seat remains
 };
 ```
@@ -155,7 +156,7 @@ type TableConfig = record {
 Defaults: `targetLevel 14`, `dealTickSeconds 1`, `declareSeconds 15`,
 `overrideSeconds 10`, `burySeconds 60`, `playSeconds 45`,
 `eventRetentionSeconds 259200`, `firstDealer 0`, `enhancedJokerOverride false`,
-`endWhenAllBots true`.
+`hintLevel High`, `endWhenAllBots true`.
 
 ## Contributing
 
