@@ -16,9 +16,11 @@ view, and the server validates every move.
 - Declarations, the bank/banker, the kitty bury, lead/follow legality, throw
   penalties, trick points and deal scoring are all adjudicated server-side.
 
-Full rules are documented in [./RULES.md](./RULES.md), serving as the definitive
-guide on how to play Tuolaji. More accessible and interactive tutorials can
-be found on https://tuolaji.online.
+Full set of rules are documented in [./RULES.md](./RULES.md), serving as the
+definitive guide on how to play Tuolaji. The rules are almost identical to
+what was described on [Wikipedia](https://en.wikipedia.org/wiki/Sheng_ji),
+but with less ambiguity. More accessible and interactive tutorials can be found
+on https://tuolaji.online.
 
 ## Trust model
 

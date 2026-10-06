@@ -69,8 +69,9 @@ parentheses for reference. Card notation: `S`=♠, `H`=♥, `C`=♣, `D`=♦,
   scoring.
 - The banker leads the first trick.
 - Cards are dealt one card at a time, starting with the seat **after the
-dealer** and rotating clockwise. The dealer is a distinct, rotating role from
-the banker: it only fixes where dealing begins (see §11).
+dealer** and rotating **counter-clockwise**. The dealer is a distinct,
+rotating role from the banker: its only effect is where dealing begins (see
+§11).
 
 ## 6. Declarations (亮主)
 
@@ -192,7 +193,7 @@ Let `P` be the attacking team's points (trick points plus any kitty scoop).
 - The winning team banks the next deal: if the banking team holds it keeps the
   bank; if the attackers win they become the banking team.
 
-## 11. The banker seat
+## 11. The banker and dealer seats
 
 - The bank team for a deal is the previous deal's winner: the banking team if
   it held, otherwise the attackers.
@@ -200,6 +201,11 @@ Let `P` be the attacking team's points (trick points plus any kitty scoop).
   team banks. A team banking for the first time starts on its lower seat.
 - Exception — a table's first deal: the final declarer banks; if nobody
   declared, seat 0 banks.
+- The **dealer** is a separate seat from the banker and never affects who
+  banks: its only effect is where dealing begins. It starts at the table's
+  configured first dealer (seat 0 by default) and advances **one seat
+  counter-clockwise every deal**, whatever the result. Dealing gives the first
+  card to the seat after the dealer and proceeds counter-clockwise.
 
 ## 12. Epochs
 
@@ -221,6 +227,7 @@ Let `P` be the attacking team's points (trick points plus any kitty scoop).
 | trump (主牌) | level cards, trump-suit cards, jokers |
 | side suit (副牌) | non-trump ordinary cards |
 | banker (庄家) | the seat that buries the kitty and leads the first trick |
+| dealer (发牌人) | the seat after which dealing begins; rotates one seat per deal |
 | banking team (庄家方) | the defending partnership |
 | attackers (闲家) | the opposing partnership |
 | single (单张) | exactly one card |
