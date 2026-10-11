@@ -68,10 +68,8 @@ parentheses for reference. Card notation: `S`=♠, `H`=♥, `C`=♣, `D`=♦,
   **buries exactly 8 cards** face down. Those buried cards are the kitty for
   scoring.
 - The banker leads the first trick.
-- Cards are dealt one card at a time, starting with the seat **after the
-dealer** and rotating **counter-clockwise**. The dealer is a distinct,
-rotating role from the banker: its only effect is where dealing begins (see
-§11).
+- Cards are dealt one card at a time, starting with the **dealer** — the
+  deal's own banker (see §11) — and rotating **counter-clockwise**.
 
 ## 6. Declarations (亮主)
 
@@ -199,13 +197,16 @@ Let `P` be the attacking team's points (trick points plus any kitty scoop).
   it held, otherwise the attackers.
 - Within a team the banker **alternates between its two seats** each deal that
   team banks. A team banking for the first time starts on its lower seat.
+- The **dealer** is the banker. The seat that banks a deal also deals it, and
+  dealing gives the **first card to the dealer itself**, then proceeds
+  counter-clockwise. The dealer has no rotation of its own: it follows the
+  bank, so it alternates inside the banking team and jumps to the other
+  partnership on a takeover.
 - Exception — a table's first deal: the final declarer banks; if nobody
-  declared, seat 0 banks.
-- The **dealer** is a separate seat from the banker and never affects who
-  banks: its only effect is where dealing begins. It starts at the table's
-  configured first dealer (seat 0 by default) and advances **one seat
-  counter-clockwise every deal**, whatever the result. Dealing gives the first
-  card to the seat after the dealer and proceeds counter-clockwise.
+  declared, seat 0 banks. That banker is not known until the declarations are
+  over, so this one deal is dealt by the table's configured **first dealer**
+  (seat 0 by default), who is also its banker whenever nobody declares. From
+  the second deal on, the dealer and the banker are always the same seat.
 
 ## 12. Epochs
 
@@ -227,7 +228,7 @@ Let `P` be the attacking team's points (trick points plus any kitty scoop).
 | trump (主牌) | level cards, trump-suit cards, jokers |
 | side suit (副牌) | non-trump ordinary cards |
 | banker (庄家) | the seat that buries the kitty and leads the first trick |
-| dealer (发牌人) | the seat after which dealing begins; rotates one seat per deal |
+| dealer (发牌人) | the banker's own seat: it deals and takes the first card |
 | banking team (庄家方) | the defending partnership |
 | attackers (闲家) | the opposing partnership |
 | single (单张) | exactly one card |

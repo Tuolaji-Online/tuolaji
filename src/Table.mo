@@ -104,7 +104,7 @@ module {
     var bankTeam : ?Nat; // partnership (seat % 2) that owns the bank; null until decided
     var banker : ?Types.Seat;
     var lastBanker : [var ?Types.Seat]; // last banker per partnership, for alternation
-    var dealer : Types.Seat; // who first receives dealt cards, rotate between 4 seats.
+    var dealer : Types.Seat; // the seat that banks the deal: it deals, and takes the first card.
     var trump : ?Types.Suit;
     var decl : ?Types.Declaration;
     var hands : [var [Card.Card]];
@@ -561,7 +561,7 @@ module {
       var dealComplete = false;
       var declareDeadline = null;
       var declareTotal = null;
-      var firstSeat = (cfg.firstDealer + 1) % 4;
+      var firstSeat = cfg.firstDealer; // the dealer takes the first card (RULES.md §11)
       var nextDealAt = null;
       var buryDeadline = null;
       var nextSeat = cfg.firstDealer;
@@ -968,6 +968,13 @@ module {
   /// Reset per-deal state and enter `#Dealing`. The deck is installed by a
   /// later `startDeal` (actor, after `Random.blob()`) or `installDeck` (tests).
   func beginDeal(st : State) {
+    // The seat that banks this deal also deals it, and dealing starts with it:
+    // the dealer is the first to receive a card (RULES.md §11). The bank fixes
+    // that seat before a card moves, except on a table's opening deal — where
+    // only a declaration can name the banker — which falls back to the
+    // configured first dealer, the banker by default anyway.
+    let dealer = switch (upcomingBanker(st)) { case (?b) { b }; case null { st.cfg.firstDealer } };
+    st.dealer := dealer;
     st.phase := #Dealing;
     st.dealNo += 1;
     st.deck := [];
@@ -984,8 +991,8 @@ module {
     st.banker := null;
     st.trump := null;
     st.decl := null;
-    st.firstSeat := (st.dealer + 1) % 4;
-    st.nextSeat := st.dealer;
+    st.firstSeat := dealer;
+    st.nextSeat := dealer;
     st.nextDealAt := null;
     st.buryDeadline := null;
     st.deadline := null;
@@ -1119,8 +1126,9 @@ module {
     ignore dealTick(st, now);
   };
 
-  /// Deal one card to each seat, wrapping every 4 cards starting at the seat
-  /// after the dealer. Returns true when the state advanced.
+  /// Deal one card to each seat, wrapping every 4 cards from `firstSeat` — the
+  /// dealer, who is dealt to first (RULES.md §11). Returns true when the state
+  /// advanced.
   public func dealTick(st : State, now : Types.Timestamp) : Bool {
     if (st.phase != #Dealing) { return false };
     if (st.deck.size() == 0) { return false };
@@ -1448,19 +1456,35 @@ module {
   func prospectiveBanker(st : State) : ?Types.Seat {
     switch (st.banker) {
       case (?b) { ?b };
+      case null { upcomingBanker(st) };
+    };
+  };
+
+  /// The seat that banks the deal about to start, ignoring `st.banker` (which
+  /// still holds the *previous* deal's banker while a deal is being set up, and
+  /// is null while the bank is undecided). Mirrors the banker choice in
+  /// `finalizeDeal`: the banking team's next seat in its alternation, its lower
+  /// seat the first time it banks, or the winning declarer while a table's bank
+  /// is still being decided — null until someone declares, since until then the
+  /// first banker is genuinely unknown.
+  ///
+  /// This is what makes a deal's dealer knowable before its first card: the
+  /// banker deals (see `beginDeal`). From the second deal of a table the bank
+  /// is decided, so the seat is exact; on the opening deal only a declaration
+  /// can name it.
+  func upcomingBanker(st : State) : ?Types.Seat {
+    switch (st.bankTeam) {
       case null {
-        if (st.bankTeam == null) {
-          // No bank yet: only a declaration fixes the first banker.
-          switch (st.decl) {
-            case (?d) { ?d.seat };
-            case null { null };
-          };
-        } else {
-          let bt = switch (st.bankTeam) { case (?b) { b }; case null { 0 } };
-          switch (st.lastBanker[bt]) {
-            case (?pb) { ?partnerOf(pb) };
-            case null { ?bt };
-          };
+        // No bank yet: only a declaration fixes the first banker.
+        switch (st.decl) {
+          case (?d) { ?d.seat };
+          case null { null };
+        };
+      };
+      case (?bt) {
+        switch (st.lastBanker[bt]) {
+          case (?pb) { ?partnerOf(pb) };
+          case null { ?bt };
         };
       };
     };
@@ -1574,7 +1598,11 @@ module {
     let newAttackerLevel = st.teamLevel[otherTeam(bankTeamOf(st))];
     st.level := newBankerLevel;
 
-    let nextDealer = (st.dealer + 1) % 4;
+    // The dealer no longer rotates on its own: the next deal is dealt by its
+    // own banker, and the bank team and its alternation were settled just above
+    // (see `beginDeal`). So the dealer now follows the bank rather than the
+    // seat order, and a takeover moves the dealer with the bank.
+    let nextDealer = switch (upcomingBanker(st)) { case (?b) { b }; case null { st.dealer } };
     // The deal was played at the bankers' pre-deal level. Only winning *while
     // already at `targetLevel` completes the epoch; reaching A from K merely
     // queues the A deal. On completion only the winning partnership advances:
@@ -1587,8 +1615,9 @@ module {
       result = { points = outcome.points; winner = outcome.winner; gain = outcome.gain };
       bankerLevel = newBankerLevel;
       attackerLevel = newAttackerLevel;
-      // The next banker is whoever declares during the next deal; the
-      // rotating dealer is only the fallback when nobody declares.
+      // `nextBanker` stays unused (null): from the second deal on the next
+      // banker is already fixed and reported as `nextDealer`, and on the
+      // opening deal nobody can name it before the declarations.
       nextBanker = null;
       nextDealer;
       trickId = finalTrickId;

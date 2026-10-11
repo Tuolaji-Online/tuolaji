@@ -123,6 +123,9 @@ module {
     // Event-log retention. Must be positive (see `validConfig`): 0 would keep
     // the log forever and let stable memory grow without bound.
     eventRetentionSeconds : Nat;
+    // The seat that deals a table's *opening* deal, whose banker is not known
+    // until its declarations end. Every later deal is dealt by its own banker,
+    // who then receives the first card (RULES.md §11).
     firstDealer : Seat;
     enhancedJokerOverride : Bool;
     // A hint for client implementations: the intelligence a hint button could
@@ -222,9 +225,10 @@ module {
     // alone cannot answer that.
     lastActivity : Timestamp;
     joinable : Bool;
-    // The prospective banker (declarer, else the rotating dealer) once a bank
-    // is decided, so the lobby can mark the seat before the deal starts. Null
-    // while the first bank is still undecided.
+    // The prospective banker (the opening deal's declarer, else the banker the
+    // team alternation picks) once a bank is decided, so the lobby can mark the
+    // seat before the deal starts. Null while the first bank is still
+    // undecided.
     banker : ?Seat;
     // The game configuration this table was created with.
     config : TableConfig;
@@ -356,6 +360,8 @@ module {
     #PlayerJoined : { seat : Seat; who : Principal; avatar : ?Avatar };
     #PlayerLeft : { seat : Seat };
     #PlayerReady : { seat : Seat };
+    // `dealer` is the seat that deals this deal, which is also the seat that
+    // banks it (RULES.md §11); dealing starts with that seat's own card.
     #DealStarted : { dealNo : Nat; dealer : Seat; level : Level };
     #ShuffleRevealed : { entropy : Blob }; // deal entropy, published once the deal is scored
     #DealTick : { dealt : Nat; toSeat : Seat };
@@ -376,6 +382,8 @@ module {
       bankerLevel : Level;
       attackerLevel : Level;
       nextBanker : ?Seat;
+      // The seat that deals the next deal — its banker, who takes the first
+      // card. The bank is settled with this deal, so the seat is known here.
       nextDealer : Seat;
       // Stable id of the deal's final trick (see `PlaySequence.trickId`), so a
       // client can anchor a problem report to the trick it just watched.
@@ -462,10 +470,14 @@ module {
     // for a spectator or a non-member), so it can build invitation links.
     authCode : ?Text;
     banker : ?Seat;
-    // The prospective banker (declarer, else rotating dealer) once a bank is
-    // decided, so the UI can mark the seat before the deal starts. Null while
-    // the first bank is still undecided.
+    // The prospective banker (the opening deal's declarer, else the banker the
+    // team alternation picks) once a bank is decided, so the UI can mark the
+    // seat before the deal starts. Null while the first bank is still
+    // undecided. This is also the seat that deals (see `dealer`).
     prospectiveBanker : ?Seat;
+    // The seat that deals the current deal: its banker, who receives the first
+    // card and starts the round counter-clockwise (RULES.md §11). Until the
+    // first bank is decided it is the configured `firstDealer`.
     dealer : Seat;
     mySeat : ?Seat;
     myHand : [Card.Card];

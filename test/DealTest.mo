@@ -181,11 +181,14 @@ module {
       i += 1;
     };
     t.check(oneEach, "first packet gives every seat one card");
-    // Dealing starts at seat (dealer+1) = 1 with the default firstDealer 0.
-    t.equalNat(st.hands[1][0], deck[0], "first card goes to seat 1");
-    t.equalNat(st.hands[2][0], deck[1], "second card goes to seat 2");
-    t.equalNat(st.hands[3][0], deck[2], "third card goes to seat 3");
-    t.equalNat(st.hands[0][0], deck[3], "fourth card goes to seat 0");
+    // The banker deals its own deal and is dealt to first, so the opening
+    // deal — whose banker is the default seat 0 — starts there and walks
+    // counter-clockwise (RULES.md §11).
+    t.equalNat(st.dealer, 0, "the opening deal uses the configured first dealer");
+    t.equalNat(st.hands[0][0], deck[0], "first card goes to the dealer (seat 0)");
+    t.equalNat(st.hands[1][0], deck[1], "second card goes to seat 1");
+    t.equalNat(st.hands[2][0], deck[2], "third card goes to seat 2");
+    t.equalNat(st.hands[3][0], deck[3], "fourth card goes to seat 3");
 
     t.check(not Table.dealTick(st, 1), "a tick before nextDealAt is ignored");
 
@@ -242,7 +245,8 @@ module {
     let st = seated(noTimeouts, ps);
     readyAll(st, ps);
     // seat 1: ♠2 + second-deck ♠2; seat 2: ♥2; seat 3: ♦2 pair.
-    let deck = deckWith([(0, 49), (4, 101), (1, 50), (2, 52), (6, 104)]);
+    // Dealing opens on seat 0, so seat *n* receives deck index 4k + n.
+    let deck = deckWith([(1, 49), (5, 101), (2, 50), (3, 52), (7, 104)]);
     Table.installDeck(st, deck, 0);
     ignore Table.dealTick(st, TICK);
 
@@ -267,7 +271,7 @@ module {
     let st = seated(strong, ps);
     readyAll(st, ps);
     // seat1 small jokers, seat2 ♥2 pair, seat3 big jokers.
-    let deck = deckWith([(0, 105), (4, 107), (1, 50), (5, 102), (2, 106), (6, 108)]);
+    let deck = deckWith([(1, 105), (5, 107), (2, 50), (6, 102), (3, 106), (7, 108)]);
     Table.installDeck(st, deck, 0);
     ignore Table.dealTick(st, TICK);
 
@@ -407,7 +411,7 @@ module {
     // window.
     let st2 = seated(cfg, ps);
     readyAll(st2, ps);
-    let deck = deckWith([(0, 49), (4, 101)]);
+    let deck = deckWith([(1, 49), (5, 101)]);
     Table.installDeck(st2, deck, 0);
     var now2 : Int = 0;
     var tk = 1;
@@ -453,7 +457,7 @@ module {
     // is only set at finalize, to the winning declarer's team.
     let st = seated(noTimeouts, ps);
     readyAll(st, ps);
-    let deck = deckWith([(0, 49)]); // seat 1 gets ♠2, a level-2 card
+    let deck = deckWith([(1, 49)]); // seat 1 gets ♠2, a level-2 card
     Table.installDeck(st, deck, 0);
     t.check(st.bankTeam == null, "the bank starts undecided");
     t.check(isOk(Table.declareTrump(st, ps[1], [49], 0)), "first declaration accepted");
@@ -476,7 +480,7 @@ module {
     st2.teamLevel[1] := 3;
     st2.bankTeam := ?0;
     readyAll(st2, ps);
-    let deck2 = deckWith([(0, 9)]); // seat 1 gets ♠5, a level-5 card
+    let deck2 = deckWith([(1, 9)]); // seat 1 gets ♠5, a level-5 card
     Table.installDeck(st2, deck2, 0);
     t.equalNat(st2.level, 5, "the deal is played at the banking team level");
     t.check(isOk(Table.declareTrump(st2, ps[1], [9], 0)), "off-team declaration accepted at the deal level");
@@ -501,7 +505,7 @@ module {
     // team's lower seat 0 — should pick up the kitty.
     let st = seated(noTimeouts, ps);
     readyAll(st, ps);
-    let deck = deckWith([(1, 49)]); // index 1 is dealt to seat 2
+    let deck = deckWith([(2, 49)]); // index 2 is dealt to seat 2
     Table.installDeck(st, deck, 0);
     t.check(isOk(Table.declareTrump(st, ps[2], [49], 0)), "seat 2 declares");
     var now = TICK;
@@ -520,7 +524,7 @@ module {
     let st2 = seated(noTimeouts, ps);
     st2.bankTeam := ?0;
     readyAll(st2, ps);
-    let deck2 = deckWith([(0, 49)]); // index 0 is dealt to seat 1 (team 1)
+    let deck2 = deckWith([(1, 49)]); // index 1 is dealt to seat 1 (team 1)
     Table.installDeck(st2, deck2, 0);
     t.check(isOk(Table.declareTrump(st2, ps[1], [49], 0)), "off-team seat 1 declares");
     var now2 = TICK;
@@ -542,7 +546,7 @@ module {
     let st = seated(cfg, ps);
     readyAll(st, ps);
     // seat 1 holds the ♠2 pair, so the second call would legally override.
-    let deck = deckWith([(0, 49), (4, 101)]);
+    let deck = deckWith([(1, 49), (5, 101)]);
     Table.installDeck(st, deck, 0);
     var now : Int = 0;
     var tick = 1;
@@ -569,7 +573,7 @@ module {
     // deck end opens the shorter override window for it.
     let st = seated(cfg, ps);
     readyAll(st, ps);
-    Table.installDeck(st, deckWith([(0, 49), (4, 101)]), 0);
+    Table.installDeck(st, deckWith([(1, 49), (5, 101)]), 0);
     t.check(isOk(Table.declareTrump(st, ps[1], [49], TICK)), "declaration during dealing is accepted");
     t.check(st.declareDeadline == null, "no timer is armed mid-deal");
     t.check(Table.view(st, ps[0]).deadline == null, "the view shows no countdown mid-deal");
@@ -615,7 +619,7 @@ module {
     t.suite("M5 unanswerable declaration skips the window");
     let cfg = { noTimeouts with declareSeconds = 5; overrideSeconds = 5 };
     // seat 1 holds both small jokers, seat 3 both big jokers.
-    let jokerDeck = [(0, 105), (4, 107), (2, 106), (6, 108)];
+    let jokerDeck = [(1, 105), (5, 107), (2, 106), (6, 108)];
 
     // A No-Trump call (a joker pair) cannot be answered, so the banker picks
     // the kitty up on the spot instead of after a full window.
@@ -635,7 +639,7 @@ module {
     // off, so it locks the deal the same way.
     let st2 = seated(cfg, ps);
     readyAll(st2, ps);
-    Table.installDeck(st2, deckWith([(0, 49), (4, 101)]), 0);
+    Table.installDeck(st2, deckWith([(1, 49), (5, 101)]), 0);
     let now2 = dealOut(st2);
     t.check(isOk(Table.declareTrump(st2, ps[1], [49, 101], now2 + TICK)), "level pair declares");
     t.check(phaseEq(st2.phase, #Burying), "an uncounterable pair locks the deal at once");
@@ -656,7 +660,7 @@ module {
     // early, but it leaves no window behind once the deck runs out.
     let st4 = seated(cfg, ps);
     readyAll(st4, ps);
-    Table.installDeck(st4, deckWith([(0, 105), (4, 107)]), 0);
+    Table.installDeck(st4, deckWith([(1, 105), (5, 107)]), 0);
     ignore Table.dealTick(st4, TICK); // seat 1 holds both small jokers from here
     t.check(isOk(Table.declareTrump(st4, ps[1], [105, 107], TICK)), "NT declared mid-deal");
     ignore Table.checkDealWindow(st4, TICK);

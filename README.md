@@ -18,9 +18,10 @@ view, and the server validates every move.
 
 Full set of rules are documented in [./RULES.md](./RULES.md), serving as the
 definitive guide on how to play Tuolaji. The rules are almost identical to
-what was described on [Wikipedia](https://en.wikipedia.org/wiki/Sheng_ji),
-but with less ambiguity. More accessible and interactive tutorials can be found
-on https://tuolaji.online.
+what was described on [Wikipedia](https://en.wikipedia.org/wiki/Sheng_ji)
+or on [Card Game Rules](https://www.pagat.com/kt5/tractor.html), but with
+less ambiguity. More accessible and interactive tutorials can be found on
+https://tuolaji.online.
 
 ## Trust model
 
@@ -148,7 +149,7 @@ type TableConfig = record {
   burySeconds : nat;               // banker timeout (0 = wait indefinitely)
   playSeconds : nat;               // turn timeout -> auto-play (0 = wait indefinitely)
   eventRetentionSeconds : nat;     // log retention (default 3 days); must be 1..2592000
-  firstDealer : Seat;
+  firstDealer : Seat;              // deals the opening deal only; later deals are dealt by their banker
   enhancedJokerOverride : bool;
   hintLevel : Intelligence;        // hint for clients (Low/Mid/High); not enforced server-side
   endWhenAllBots : bool;           // end once no human-owned seat remains
