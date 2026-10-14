@@ -2179,6 +2179,10 @@ module {
         attackerPoints = st.attackerPoints;
         bankerLevel = st.teamLevel[bankerTeam];
         attackerLevel = st.teamLevel[otherTeam(bankerTeam)];
+        // Keyed like the levels just above, so a client puts each partnership's
+        // epoch count under the level pill it belongs to.
+        bankerEpoch = st.teamEpoch[bankerTeam];
+        attackerEpoch = st.teamEpoch[otherTeam(bankerTeam)];
       };
       actingSeat = switch (st.phase) {
         case (#Burying) { st.banker };

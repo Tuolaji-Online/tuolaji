@@ -1085,7 +1085,14 @@ persistent actor {
       mySeat = null;
       myHand = [];
       seats = [];
-      score = { bankerPoints = 0; attackerPoints = 0; bankerLevel = 2; attackerLevel = 2 };
+      score = {
+        bankerPoints = 0;
+        attackerPoints = 0;
+        bankerLevel = 2;
+        attackerLevel = 2;
+        bankerEpoch = 1;
+        attackerEpoch = 1;
+      };
       actingSeat = null;
       trick = [];
       lastTrick = null;

@@ -441,16 +441,26 @@ module {
   /// with `banker % 2`. After a takeover the bank team has flipped but the view
   /// still reports the seat that banked the finished deal, so keying by the
   /// bank team instead would swap the two levels until the next deal.
+  ///
+  /// `bankerEpoch`/`attackerEpoch` are the same two partnerships' epoch
+  /// counters, keyed the same way, so a client can show each partnership's
+  /// completed epochs (`epoch - 1`) beside its own level. Both start at 1; a
+  /// partnership's counter advances only when *it* completes an epoch, so the
+  /// two counters say nothing about each other.
   public type Score = {
     bankerPoints : Nat;
     attackerPoints : Nat;
     bankerLevel : Level;
     attackerLevel : Level;
+    bankerEpoch : Nat;
+    attackerEpoch : Nat;
   };
 
   public type PlayerView = {
     tableId : TableId;
     dealNo : Nat;
+    // The epoch of the partnership this viewer belongs to (the bank's for a
+    // spectator); both partnerships' counters are in `score`.
     epoch : Nat;
     // Server time by which the table is idle and should be treated as ended;
     // see `TableInfo.endingTime`.
