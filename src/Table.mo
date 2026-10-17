@@ -1685,11 +1685,14 @@ module {
     if (isFollow) {
       switch (st.lead) {
         case (?lead) {
-          var offSuit = false;
+          // A follower is void in the lead category only when they played
+          // none of it. A pair lead answered with one card of the suit plus an
+          // off-suit card does not exhaust the suit.
+          var followed = false;
           for (c in played.vals()) {
-            if (Card.category(c, game) != lead.category) { offSuit := true };
+            if (Card.category(c, game) == lead.category) { followed := true };
           };
-          if (offSuit) { st.voids := Basic.markVoid(st.voids, s, lead.category) };
+          if (not followed) { st.voids := Basic.markVoid(st.voids, s, lead.category) };
         };
         case null {};
       };
