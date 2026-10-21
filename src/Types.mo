@@ -505,7 +505,27 @@ module {
 
   /// Read-only cost/observability snapshot.
   public type Metrics = {
+    /// Cumulative tables created since the canister was installed.
     tables : Nat;
+    /// Tables currently retained (live, or ended but not yet swept).
+    tablesLive : Nat;
+    /// Cumulative deals completed since the canister was installed.
+    deals : Nat;
+    /// Retained problem reports, and those whose latest message is from the
+    /// reporter (awaiting an admin reply).
+    reportsTotal : Nat;
+    reportsOpen : Nat;
+    /// Runtime memory in bytes. `stableMemoryBytes` is the 64 KiB stable-memory
+    /// pages multiplied out (0 before the first upgrade under enhanced
+    /// orthogonal persistence); `heapBytes` is the Motoko heap.
+    stableMemoryBytes : Nat;
+    heapBytes : Nat;
+    /// Seconds since the canister's current deployment started.
+    uptimeSeconds : Nat;
+    /// Wall-clock time of the last accepted table activity; 0 if never.
+    lastActivityAt : Timestamp;
+    /// Tables with a pending scheduler wake.
+    timerQueueDepth : Nat;
     nextTableId : TableId;
     tickCount : Nat;
     cycleBalance : Nat;

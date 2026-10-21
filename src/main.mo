@@ -4,6 +4,7 @@ import Array "mo:core/Array";
 import Cycles "mo:core/Cycles";
 import Debug "mo:core/Debug";
 import Error "mo:core/Error";
+import Int "mo:core/Int";
 import List "mo:core/List";
 import Map "mo:core/Map";
 import Nat "mo:core/Nat";
@@ -129,6 +130,11 @@ persistent actor {
   /// Number of timer callbacks the scheduler has run, for the metrics snapshot.
   var tickCount : Nat = 0;
 
+  /// Count a deal once, when `finishDeal` moves the table to `#Scoring`.
+  func noteDealScored(before : Types.Phase, s : Table.State) {
+    if (before != #Scoring and s.phase == #Scoring) { dealsTotal += 1 };
+  };
+
   /// Reject obviously oversized ingress before it is scheduled, saving cycles
   /// on abuse. The largest legitimate argument is a card list
   /// (well under 1 KiB); 4 KiB is a generous ceiling.
@@ -139,12 +145,31 @@ persistent actor {
 
   let tables = Map.empty<Types.TableId, Table.State>();
   var nextTableId : Types.TableId = 0;
+  /// Cumulative completed deals. A deal is complete when `finishDeal` moves
+  /// the table to `#Scoring`; sweeping the table does not forget it.
+  var dealsTotal : Nat = 0;
+  /// Wall-clock time this deployment started. A fresh install (or the upgrade
+  /// that adds the field) sets it; later upgrades keep the persisted value.
+  var installedAt : Types.Timestamp = 0;
+  /// Wall-clock time of the last accepted table activity; 0 until the first.
+  var lastActivityAt : Types.Timestamp = 0;
+  if (installedAt == 0) { installedAt := Time.now() };
 
   /// Player-filed problem reports, keyed by a monotonically increasing id.
   let reports = Map.empty<Types.ReportId, Types.Report>();
   var nextReportId : Types.ReportId = 0;
   transient let MAX_REPORTS : Nat = 2000;
   transient let MAX_REPORT_TEXT : Nat = 2000;
+
+  /// A report is open until an admin replies; a reporter follow-up reopens it.
+  func countOpenReports() : Nat {
+    var open = 0;
+    for (r in Map.values(reports)) {
+      let n = r.messages.size();
+      if (n == 0 or not r.messages[n - 1].admin) { open += 1 };
+    };
+    open;
+  };
 
   /// One-off timer scheduler: each table queues its earliest
   /// deadline and only a single `Timer.setTimer` is armed at a time, so an
@@ -178,6 +203,7 @@ persistent actor {
   /// lazily (no timer needed), reschedule it, and re-arm.
   func touch<system>(s : Table.State) : async () {
     let now = Time.now();
+    lastActivityAt := now;
     Table.prune(s, now);
     reschedule(s, now);
     rearm<system>(now);
@@ -262,10 +288,13 @@ persistent actor {
       try {
         switch (find(id)) {
           case (?s) {
-            ignore Table.dealTick(s, now);
-            ignore Table.checkDealWindow(s, now);
-            ignore Table.autoBury(s, now);
-            ignore Table.autoPlay(s, now);
+            let dealt = Table.dealTick(s, now);
+            let finalized = Table.checkDealWindow(s, now);
+            let buried = Table.autoBury(s, now);
+            let phaseBefore = s.phase;
+            let played = Table.autoPlay(s, now);
+            noteDealScored(phaseBefore, s);
+            if (dealt or finalized or buried or played) { lastActivityAt := now };
             Table.prune(s, now);
             ignore pushClients(s);
           };
@@ -777,10 +806,26 @@ persistent actor {
     };
   };
 
+  func uptimeSeconds() : Nat {
+    let elapsed = Time.now() - installedAt;
+    if (elapsed < 0) { 0 } else { Int.toNat(elapsed / 1_000_000_000) };
+  };
+
   /// Read-only cost/observability snapshot.
   public query func getMetrics() : async Types.Metrics {
     {
-      tables = Map.size(tables);
+      // Table ids are allocated monotonically and never reused, so the next
+      // id is the cumulative number of tables created.
+      tables = nextTableId;
+      tablesLive = Map.size(tables);
+      deals = dealsTotal;
+      reportsTotal = Map.size(reports);
+      reportsOpen = countOpenReports();
+      stableMemoryBytes = Prim.rts_stable_memory_size() * 65536;
+      heapBytes = Prim.rts_heap_size();
+      uptimeSeconds = uptimeSeconds();
+      lastActivityAt;
+      timerQueueDepth = Scheduler.size(sched);
       nextTableId;
       tickCount;
       cycleBalance = Cycles.balance();
@@ -987,7 +1032,9 @@ persistent actor {
         switch (sanitize(req.cards)) {
           case (?e) { #err({ seq = Table.seqOf(s); code = e.code; detail = e.detail }) };
           case null {
+            let phaseBefore = s.phase;
             let r = Table.playWithClient(s, msg.caller, req.clientId, req.cards, Time.now());
+            noteDealScored(phaseBefore, s);
             ignore touch<system>(s);
             switch (r) {
               case (#ok(okr)) { #ok({ seq = Table.seqOf(s); penalized = okr.penalized }) };

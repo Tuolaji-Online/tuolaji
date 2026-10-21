@@ -38,6 +38,11 @@ module {
     Map.remove(st.entries, id);
   };
 
+  /// Number of tables with a pending wake, for the metrics snapshot.
+  public func size(st : State) : Nat {
+    Map.size(st.entries);
+  };
+
   /// Earliest queued wake time, or null when nothing is pending.
   public func earliest(st : State) : ?Types.Timestamp {
     var min : ?Types.Timestamp = null;
