@@ -250,7 +250,12 @@ module {
   public type TableFilter = {
     phase : ?Phase;
     joinableOnly : Bool;
-    afterId : ?TableId; // cursor: only tables with id > afterId
+    // Cursor. The live listing pages on id itself, its natural order: only rows
+    // with `id > afterId`. The ended listing is ordered by `endedAt`, newest
+    // finished first, so its cursor is the id of the last row shown - that row's
+    // end time, read back from the registry, places it - and an id the registry
+    // no longer holds ends the listing with an empty page.
+    afterId : ?TableId;
     limit : ?Nat; // page size, capped server-side
   };
 

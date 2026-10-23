@@ -715,8 +715,79 @@ module {
     t.check(not penalized([Card.makeId(1, 1, 8), Card.makeId(1, 1, 9)]), "the same throw is legal when no hand, departed or not, beats it");
   };
 
+  // ── ended listing: the time a row sorts on, and the order ──────────
+
+  func testEndedOrder(t : Test.Harness, ps : [Principal]) {
+    t.suite("ended listing order");
+    // A table nobody ended still has a time to sort on: its newest event, the
+    // quiet that its idle deadline is counting.
+    let live = Table.new(0, Types.defaultConfig, ps[0], 700);
+    t.check(Table.endedAtOf(live) == ?700, "a table nobody ended sorts on its last event");
+    ignore Table.joinTable(live, ps[1], 1, 900);
+    t.check(Table.endedAtOf(live) == ?900, "that time follows the newest event");
+    t.check(
+      Table.info(live).endedAt == Table.endedAtOf(live),
+      "the lobby row and the listing order read the same end time",
+    );
+    let endedTable = Table.new(1, Types.defaultConfig, ps[0], 100);
+    endedTable.endedAt := ?5_000;
+    t.check(Table.endedAtOf(endedTable) == ?5_000, "a recorded end beats any last event");
+    // Newest finished first; a row that knows when it ended ranks above one that
+    // does not; equal ends fall back to the id, so the order is total.
+    let rows = [
+      (?100, 1),
+      (?300, 2),
+      (null, 3),
+      (?300, 4),
+      (?50, 5),
+    ];
+    let order = Table.endedPage(rows, null, 100);
+    t.check(order == [4, 2, 1, 5, 3], "newest finished first, unknown ends last, ids break a tie");
+    // The order is a property of the rows, not of the order the registry handed
+    // them over.
+    t.check(
+      Table.endedPage([(?50, 5), (null, 3), (?300, 4), (?100, 1), (?300, 2)], null, 100) == order,
+      "the ended order does not depend on the scan order",
+    );
+    // A table that opened long ago and finished last night leads the listing even
+    // though its id is the lowest: ids page the live lists, never this one.
+    t.check(
+      Table.endedPage([(null, 99), (?1, 98), (?9_000, 0)], null, 100) == [0, 98, 99],
+      "the oldest id leads when it finished most recently",
+    );
+    // The cap cuts the newest rows, not the ones the scan happened to reach.
+    t.check(Table.endedPage(rows, null, 2) == [4, 2], "a capped page holds the newest finished rows");
+    t.check(Table.endedPage(rows, null, 0) == [], "a zero page holds nothing");
+    // The cursor is the last row shown, not a bound on ids: the anchored row
+    // itself drops out and the listing continues below it, whatever the ids say.
+    t.check(
+      Table.endedPage(rows, ?(?300, 4), 100) == [2, 1, 5, 3],
+      "the cursor's row is dropped and the rows after it follow",
+    );
+    t.check(
+      Table.endedPage(rows, ?(?300, 2), 100) == [1, 5, 3],
+      "a cursor on a later id continues from its own row, not from an id window",
+    );
+    // A cursor naming a row the listing itself never showed (it was filtered out)
+    // still places the caller: the order is defined on the (end time, id) pair.
+    t.check(
+      Table.endedPage(rows, ?(?100, 99), 100) == [1, 5, 3],
+      "an anchor outside the candidate rows still places the page",
+    );
+    // Page by page the listing tiles: every row once, none skipped, then it ends.
+    let p1 = Table.endedPage(rows, null, 2);
+    let p2 = Table.endedPage(rows, ?(?300, 2), 2);
+    let p3 = Table.endedPage(rows, ?(?50, 5), 2);
+    let p4 = Table.endedPage(rows, ?(null, 3), 2);
+    t.check(p1 == [4, 2], "the first page");
+    t.check(p2 == [1, 5], "the second page continues from the last row shown");
+    t.check(p3 == [3], "the last page holds what is left");
+    t.check(p4 == [], "and then the listing ends");
+  };
+
   public func run(t : Test.Harness) {
     let ps = principals();
+    testEndedOrder(t, ps);
     testCursor(t, ps);
     testPrivacy(t, ps);
     testAuth(t, ps);

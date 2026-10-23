@@ -14,8 +14,10 @@
 import Array "mo:core/Array";
 import Blob "mo:core/Blob";
 import Debug "mo:core/Debug";
+import Int "mo:core/Int";
 import List "mo:core/List";
 import Nat "mo:core/Nat";
+import Order "mo:core/Order";
 import Principal "mo:core/Principal";
 import Text "mo:core/Text";
 import VarArray "mo:core/VarArray";
@@ -1939,6 +1941,71 @@ module {
     found;
   };
 
+  /// When the table finished: the recorded end, or, for a table nobody ended
+  /// explicitly, the time of its last event - the idle deadline passing is what
+  /// puts such a row in the ended listing, and the duration the lobby prints
+  /// runs to the same moment. Null only for a table that never emitted an event.
+  /// One definition, shared with `info`, so the listing's order and the time it
+  /// shows on the row can never disagree.
+  public func endedAtOf(st : State) : ?Types.Timestamp {
+    switch (st.endedAt) {
+      case (?t) { ?t };
+      case null { switch (st.log.last()) { case (?e) { ?e.at }; case null { null } } };
+    };
+  };
+
+  /// Two ended rows in lobby order: the one that finished most recently shows
+  /// first; a row that knows when it ended ranks above one that does not (the
+  /// client sorts the same way); the id breaks a tie, so the order is total and
+  /// does not depend on the order the registry handed the rows over.
+  func endedOrder(
+    a : (?Types.Timestamp, Types.TableId),
+    b : (?Types.Timestamp, Types.TableId),
+  ) : Order.Order {
+    switch (a.0, b.0) {
+      case (?x, ?y) {
+        let c = Int.compare(y, x); // newest end first
+        if (c != #equal) { c } else { Nat.compare(b.1, a.1) };
+      };
+      case (?_, null) { #less };
+      case (null, ?_) { #greater };
+      case (null, null) { Nat.compare(b.1, a.1) };
+    };
+  };
+
+  /// A page of the ended listing: `rows` in lobby order, everything at or
+  /// before `anchor` dropped, cut to `limit`.
+  ///
+  /// `anchor` is the (end time, id) of the last row the caller was shown, or
+  /// null for the first page. It is a *row*, not a bound: this listing is
+  /// ordered by when each table finished, which ids do not index - a table
+  /// opened last week can close tonight - so `id < cursor` would page by
+  /// opening time and strand the rows that opened late and finished early. The
+  /// caller holds only the id, and the row's own end time is what locates that
+  /// id here; a row filtered out of the listing (a table with no trick
+  /// retained) still anchors, because the order is defined on the pair.
+  public func endedPage(
+    rows : [(?Types.Timestamp, Types.TableId)],
+    anchor : ?(?Types.Timestamp, Types.TableId),
+    limit : Nat,
+  ) : [Types.TableId] {
+    let sorted = Array.sort<(?Types.Timestamp, Types.TableId)>(rows, endedOrder);
+    let page = List.empty<Types.TableId>();
+    var i = 0;
+    while (i < sorted.size() and List.size(page) < limit) {
+      let row = sorted[i];
+      // `#greater` means the row shows after the anchor; the anchor itself
+      // compares `#equal` and is excluded, as is anything ahead of it.
+      let show = switch (anchor) {
+        case null { true };
+        case (?a) { endedOrder(row, a) == #greater };
+      };
+      if (show) { page.add(row.1) };
+      i += 1;
+    };
+    List.toArray(page);
+  };
+
   /// Completed tricks in play order, reconstructed from the retained event log.
   /// `trickNo` resets on each `DealStarted` so callers can group by deal; the
   /// `trickId` is the `TrickWon` event sequence (stable across pruning). Pass a
@@ -1981,9 +2048,6 @@ module {
     };
     st.participants.add({ principal; avatar });
   };
-
-  /// True once the event log has been trimmed, so its history is incomplete.
-  public func historyPruned(st : State) : Bool { st.lowWater > 1 };
 
   /// Scored deals in deal order, reconstructed from the retained event log.
   func dealHistory(st : State) : [Types.DealOutcome] {
@@ -2293,11 +2357,9 @@ module {
       startedAt = st.startedAt;
       // A table that is not explicitly ended has no `endedAt`; let the duration
       // run through the last activity instead of showing nothing (the idle
-      // tables in the ended listing are effectively over).
-      endedAt = switch (st.endedAt) {
-        case (?t) { ?t };
-        case null { switch (st.log.last()) { case (?e) { ?e.at }; case null { null } } };
-      };
+      // tables in the ended listing are effectively over). The ended listing
+      // orders its rows by this same value (`endedFirst`).
+      endedAt = endedAtOf(st);
       participants = st.participants.toArray();
     };
   };

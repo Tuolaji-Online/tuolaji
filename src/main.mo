@@ -636,7 +636,10 @@ persistent actor {
 
   public query (msg) func listTables(filter : Types.TableFilter) : async [Types.TableInfo] {
     // Hard server-side page cap so a caller cannot force an unbounded scan.
-    // `afterId` is an exclusive cursor over increasing table ids.
+    // `afterId` pages both listings, differently because they are ordered
+    // differently: an exclusive lower bound on id in the live listing (ids
+    // ascend, so that is the order), and the last row shown in the ended one
+    // (see `endedPage`) because that listing is ordered by finish time.
     let now = Time.now();
     let maxPage : Nat = 100;
     let cap = switch (filter.limit) {
@@ -645,6 +648,15 @@ persistent actor {
     };
     let out = List.empty<Types.TableInfo>();
     let showEnded = switch (filter.phase) { case (?#Ended) { true }; case _ { false } };
+    // The ended listing is ordered by when each table *finished*, which the
+    // registry does not index: ids say when a table opened, and one opened last
+    // week can close tonight. So the ended pass collects every qualifying row as
+    // an (end time, id) pair - two numbers each - hands them to
+    // `Table.endedPage`, and builds `infoFor` only for the page. Paging a walk
+    // by id instead pages by age: once more than `cap` finished tables were
+    // retained (they linger for `ENDED_RETENTION_NANOS`), a table that finished
+    // a moment ago never reached the lobby at all.
+    let ended = List.empty<(?Types.Timestamp, Types.TableId)>();
     var emitted = 0;
     var more = true;
     let it = Map.entries(tables);
@@ -652,11 +664,18 @@ persistent actor {
       switch (it.next()) {
         case null { more := false };
         case (?(id, s)) {
+          // The live listing pages on id, which is its own order. The ended
+          // listing ignores the cursor here: it has to see every row to order
+          // them, and its cursor is a row resolved against the sorted page
+          // below, not a bound on the scan.
           let afterOk = switch (filter.afterId) {
-            case (?a) { id > a };
+            case (?a) { if (showEnded) { true } else { id > a } };
             case null { true };
           };
-          if (afterOk and emitted < cap) {
+          // The live listing stops when its page is full. The ended pass cannot
+          // stop early: a row it has not looked at yet may have finished later
+          // than everything it has.
+          if (afterOk and (showEnded or emitted < cap)) {
             let info = Table.infoFor(s, ?msg.caller);
             let over = Table.isOver(s, now);
             let phaseOk = switch (filter.phase) {
@@ -668,9 +687,16 @@ persistent actor {
             // listing keeps it (it is still swept to `Ended` by the next
             // ingress).
             let live = not Table.isIdle(s, now);
-            // An ended table is only listed when it has a report to open: a
-            // pruned log or no completed trick leaves nothing to show.
-            let reportable = Table.hasTricks(s) and not Table.historyPruned(s);
+            // An ended table is only listed when it has a report to open, and
+            // the only thing that leaves nothing to show is a retained log with
+            // no completed trick. The head of the log is pruned on every touch
+            // once the table outlives `eventRetentionSeconds`, so an *un-pruned
+            // log* would hide every table older than that window - including one
+            // that ended a moment ago and still has its tricks to show. Pruning
+            // must follow what is retained, not how long the table has been
+            // open: the `historyPruned` test this replaces read `lowWater`,
+            // which says when the table started, never when it last played.
+            let reportable = Table.hasTricks(s);
             // A private table is hidden from the live listing, except to a
             // principal who already holds a seat in it (so their other devices
             // can find it and re-enter). It still appears in the ended listing
@@ -679,13 +705,47 @@ persistent actor {
             // this lists is a row they can actually open.
             let mine = info.isPrivate and Table.principalHasSeat(s, msg.caller);
             if ((live or showEnded) and (showEnded or not info.isPrivate or mine) and phaseOk and (showEnded or info.phase != #Ended) and (not filter.joinableOnly or info.joinable) and (not showEnded or reportable)) {
-              out.add(info);
-              emitted += 1;
+              if (showEnded) {
+                // The pair is what decides the order; the row itself is built
+                // once, below.
+                ended.add((Table.endedAtOf(s), id));
+              } else {
+                out.add(info);
+                emitted += 1;
+              };
             };
-          } else if (emitted >= cap) {
+          } else if (not showEnded and emitted >= cap) {
             more := false;
           };
         };
+      };
+    };
+    // The ended page: newest finished first, from the anchored row on, then
+    // built. The cursor names the last row the caller was shown, and that row's
+    // end time is what places it in this order - the caller has no other way to
+    // say it, and the registry has the answer. A cursor naming a row the
+    // registry no longer holds (evicted, or never ours) ends the listing with an
+    // empty page: restarting at the top would have the caller page through the
+    // same rows for ever.
+    if (showEnded) {
+      let ordered = switch (filter.afterId) {
+        case null { Table.endedPage(List.toArray(ended), null, cap) };
+        case (?a) {
+          switch (find(a)) {
+            case (?s) { Table.endedPage(List.toArray(ended), ?(Table.endedAtOf(s), a), cap) };
+            case null { [] : [Types.TableId] };
+          };
+        };
+      };
+      // A query cannot interleave with an update, so every id above is still in
+      // the registry - the null arm is defensive, not reachable.
+      var i = 0;
+      while (i < ordered.size()) {
+        switch (find(ordered[i])) {
+          case (?s) { out.add(Table.infoFor(s, ?msg.caller)) };
+          case null {};
+        };
+        i += 1;
       };
     };
     out.toArray();
