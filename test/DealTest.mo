@@ -2,6 +2,7 @@
 /// trump declarations during dealing (I8), bury + kitty handling (I1 partial),
 /// privacy of dealt hands, and the bury deadline / auto-bury path (I9).
 import Array "mo:core/Array";
+import List "mo:core/List";
 import Nat "mo:core/Nat";
 import Principal "mo:core/Principal";
 import VarArray "mo:core/VarArray";
@@ -713,6 +714,68 @@ module {
     t.equalNat(score.attackerLevel, 3, "attackerLevel is the other team");
   };
 
+  /// Replaying a scored round restores the burying-phase snapshot: same hands,
+  /// kitty, trump, banker and level, with the abandoned result rolled back.
+  func testReplayRound(t : Test.Harness, ps : [Principal]) {
+    t.suite("replay round from burying");
+    let st = seated(noTimeouts, ps);
+    readyAll(st, ps);
+    let now = dealAll(st);
+    t.check(phaseEq(st.phase, #Burying), "dealt into Burying");
+
+    let hands = [st.hands[0], st.hands[1], st.hands[2], st.hands[3]];
+    let kitty = st.kitty;
+    let banker = st.banker;
+    let trump = st.trump;
+    let level = st.level;
+    let teamLevels = [st.teamLevel[0], st.teamLevel[1]];
+    let snapOpt = Table.replaySnapshot(st);
+    t.check(snapOpt != null, "a burying-phase snapshot is available");
+    let snap = switch (snapOpt) { case (?x) { x }; case null { return } };
+
+    // Score the round without playing: the banker side wins and levels move,
+    // which the replay must roll back.
+    Table.debugFinishDeal(st, now);
+    t.check(phaseEq(st.phase, #Scoring), "the unfinished round scores");
+    t.check(st.teamLevel[0] != teamLevels[0] or st.teamLevel[1] != teamLevels[1], "the result moved a level");
+
+    let r = Table.replayRound(st, snap, ps[2], null, now + TICK);
+    t.check(isOk(r), "any seated player may replay");
+    t.check(phaseEq(st.phase, #Burying), "the replay starts at Burying");
+    t.check(st.dealNo == 1, "the same round number is kept");
+    t.check(st.banker == banker, "the same banker is restored");
+    t.check(st.trump == trump, "the same trump is restored");
+    t.equalNat(st.level, level, "the same level is restored");
+    t.equalNat(st.teamLevel[0], teamLevels[0], "team 0 level is rolled back");
+    t.equalNat(st.teamLevel[1], teamLevels[1], "team 1 level is rolled back");
+    t.equalNat(st.bankerPoints, 0, "banker points restart at zero");
+    t.equalNat(st.attackerPoints, 0, "attacker points restart at zero");
+    t.check(Array.equal<Card.Card>(st.kitty, kitty), "the same kitty cards are back in the banker's hand");
+    var sameHands = true;
+    var i = 0;
+    while (i < 4) {
+      if (not Array.equal<Card.Card>(st.hands[i], hands[i])) { sameHands := false };
+      i += 1;
+    };
+    t.check(sameHands, "every hand is the same as before the round");
+
+    var dealtStarts = 0;
+    var sawHand = false;
+    for (e in st.log.values()) {
+      switch (e.body) {
+        case (#DealStarted(d)) { if (d.dealNo == 1) { dealtStarts += 1 } };
+        case (#HandUpdated(h)) { if (h.seat == 0 and h.hand.size() == 33) { sawHand := true } };
+        case _ {};
+      };
+    };
+    t.check(dealtStarts == 2, "the replay re-emits DealStarted without a new event variant");
+    t.check(sawHand, "the banker's full hand is re-sent privately");
+
+    // The actor gates the option; Table still insists on a scored round.
+    t.check(isErr(Table.replayRound(st, snap, ps[2], null, now + TICK), #WrongPhase), "replay is refused outside Scoring");
+    t.check(isErr(Table.replayRound(st, snap, ps[4], null, now + TICK), #NotASeat), "a non-seated caller cannot replay");
+  };
+
   /// The deal-time deck integrity check. A deck must be a permutation of the 108
   /// canonical ids, which guarantees at most two cards of any face — the fact the
   /// pair/tractor decomposition relies on. This replaced a per-follow check that
@@ -763,5 +826,6 @@ module {
     testTerminalDeclaration(t, ps);
     testEventRetention(t, ps);
     testScoringView(t, ps);
+    testReplayRound(t, ps);
   };
 }

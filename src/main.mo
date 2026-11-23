@@ -144,6 +144,13 @@ persistent actor {
   };
 
   let tables = Map.empty<Types.TableId, Table.State>();
+  // Replay data lives outside `Table.State` on purpose: adding fields to the
+  // persisted table record would make every existing table upgrade-incompatible.
+  // These are newly declared stable variables, which Motoko can introduce
+  // without a migration. `replayAllowed` is the create-table option; the
+  // snapshot is captured when a deal reaches `#Burying`.
+  let replayAllowed = Map.empty<Types.TableId, Bool>();
+  let replayStates = Map.empty<Types.TableId, Table.ReplayState>();
   var nextTableId : Types.TableId = 0;
   /// Cumulative completed deals. A deal is complete when `finishDeal` moves
   /// the table to `#Scoring`; sweeping the table does not forget it.
@@ -189,6 +196,32 @@ persistent actor {
     Scheduler.arm<system>(sched, now, fire);
   };
 
+  /// Capture the burying-phase snapshot after a mutation that may have just
+  /// moved a replay-enabled table into `#Burying`.
+  func rememberReplay(s : Table.State, before : Types.Phase) {
+    if (before == #Burying or s.phase != #Burying) { return };
+    switch (Map.get(replayAllowed, s.id)) {
+      case (?true) {
+        switch (Table.replaySnapshot(s)) {
+          case (?r) { Map.add(replayStates, s.id, r) };
+          case null { Map.remove(replayStates, s.id) };
+        };
+      };
+      case _ { Map.remove(replayStates, s.id) };
+    };
+  };
+
+  func replayEnabled(id : Types.TableId) : Bool {
+    switch (Map.get(replayAllowed, id)) {
+      case (?true) { true };
+      case _ { false };
+    };
+  };
+
+  func withReplayView(id : Types.TableId, v : Types.PlayerView) : Types.PlayerView {
+    { v with allowReplay = replayEnabled(id) };
+  };
+
   /// Fetch the beacon entropy for a pending shuffle and install the deck. One
   /// 32-byte `raw_rand` blob seeds the ChaCha20 keystream the shuffle draws
   /// from (see `Shuffle.shuffleWithEntropy`); the blob is stored by the table
@@ -223,6 +256,8 @@ persistent actor {
     };
     for (id in stale.values()) {
       Map.remove(tables, id);
+      Map.remove(replayAllowed, id);
+      Map.remove(replayStates, id);
       Scheduler.remove(sched, id);
     };
   };
@@ -288,10 +323,11 @@ persistent actor {
       try {
         switch (find(id)) {
           case (?s) {
+            let phaseBefore = s.phase;
             let dealt = Table.dealTick(s, now);
             let finalized = Table.checkDealWindow(s, now);
+            rememberReplay(s, phaseBefore);
             let buried = Table.autoBury(s, now);
-            let phaseBefore = s.phase;
             let played = Table.autoPlay(s, now);
             noteDealScored(phaseBefore, s);
             if (dealt or finalized or buried or played) { lastActivityAt := now };
@@ -581,7 +617,8 @@ persistent actor {
         detail = "auth code must be " # Nat.toText(Table.MIN_AUTH_CODE) # ".." # Nat.toText(Table.MAX_AUTH_CODE) # " characters";
       });
     };
-    await create(config, req.reserved, req.avatar, req.clientId, req.authCode, msg.caller);
+    let allowReplay = switch (req.allowReplay) { case (?v) { v }; case null { false } };
+    await create(config, req.reserved, req.avatar, req.clientId, req.authCode, allowReplay, msg.caller);
   };
 
   func create(
@@ -590,6 +627,7 @@ persistent actor {
     avatar : ?Types.Avatar,
     clientId : ?Types.ClientId,
     authCode : ?Text,
+    allowReplay : Bool,
     caller : Principal,
   ) : async Types.CreateResult {
     // Validate the caller-supplied avatar and client id before touching any
@@ -629,6 +667,7 @@ persistent actor {
     };
     if (Access.isCanister(caller)) { Table.addClient(s, caller, clientId, 0) };
     Map.add(tables, id, s);
+    if (allowReplay) { Map.add(replayAllowed, id, true) };
     ignore Table.endIfNoHumans(s, isBotPrincipal, now);
     ignore touch<system>(s);
     #ok(id);
@@ -1033,11 +1072,40 @@ persistent actor {
           case (?e) { return #err({ seq = Table.seqOf(s); code = e.code; detail = e.detail }) };
           case null {};
         };
+        let phaseBefore = s.phase;
         let r = Table.readyWithClient(s, msg.caller, req.clientId, Time.now());
+        rememberReplay(s, phaseBefore);
         // A deal was just announced: fetch entropy and shuffle before any
         // client can see a hand. The await happens before the deal state is
         // committed; `startDeal` re-checks the phase.
         await sealDeal(s);
+        ignore touch<system>(s);
+        switch (r) {
+          case (#ok(_)) { #ok({ seq = Table.seqOf(s); penalized = false }) };
+          case (#err(e)) { #err(e) };
+        };
+      };
+      case null { notFound() };
+    };
+  };
+
+  /// Restart the just-scored round from its burying phase (only when the table
+  /// was created with `allowReplay`). Any seated player may call it.
+  public shared(msg) func replayRound(req : Types.ReadyRequest) : async Types.ActionResult {
+    switch (find(req.id)) {
+      case (?s) {
+        switch (chargeClient<system>(s, msg.caller, req.clientId)) {
+          case (?e) { return #err({ seq = Table.seqOf(s); code = e.code; detail = e.detail }) };
+          case null {};
+        };
+        if (not replayEnabled(req.id)) {
+          return #err({ seq = Table.seqOf(s); code = #WrongPhase; detail = "replay is not enabled for this table" });
+        };
+        let snap = switch (Map.get(replayStates, req.id)) {
+          case (?r) { r };
+          case null { return #err({ seq = Table.seqOf(s); code = #WrongPhase; detail = "no round to replay" }) };
+        };
+        let r = Table.replayRound(s, snap, msg.caller, req.clientId, Time.now());
         ignore touch<system>(s);
         switch (r) {
           case (#ok(_)) { #ok({ seq = Table.seqOf(s); penalized = false }) };
@@ -1059,7 +1127,13 @@ persistent actor {
         };
         switch (sanitize(req.cards)) {
           case (?e) { #err({ seq = Table.seqOf(s); code = e.code; detail = e.detail }) };
-          case null { let r = Table.declareTrumpWithClient(s, msg.caller, req.clientId, req.cards, Time.now()); ignore touch<system>(s); r };
+          case null {
+            let phaseBefore = s.phase;
+            let r = Table.declareTrumpWithClient(s, msg.caller, req.clientId, req.cards, Time.now());
+            rememberReplay(s, phaseBefore);
+            ignore touch<system>(s);
+            r;
+          };
         };
       };
       case null { notFound() };
@@ -1115,7 +1189,10 @@ persistent actor {
       // same empty response; clients treat a missing table separately via
       // getTable/listTables.
       case (?s) {
-        if (Table.mayRead(s, msg.caller, req.authCode, Time.now())) { Table.pollWithClient(s, msg.caller, req.clientId, req.afterSeq) } else { noTable(req.tableId) };
+        if (Table.mayRead(s, msg.caller, req.authCode, Time.now())) {
+          let res = Table.pollWithClient(s, msg.caller, req.clientId, req.afterSeq);
+          { res with view = withReplayView(req.tableId, res.view) };
+        } else { noTable(req.tableId) };
       };
       case null { noTable(req.tableId) };
     };
@@ -1145,7 +1222,8 @@ persistent actor {
           };
           case null {};
         };
-        Table.pollWithClient(s, msg.caller, req.clientId, req.afterSeq);
+        let res = Table.pollWithClient(s, msg.caller, req.clientId, req.afterSeq);
+        { res with view = withReplayView(req.tableId, res.view) };
       };
       case null { noTable(req.tableId) };
     };
@@ -1168,7 +1246,7 @@ persistent actor {
       fullSync = true;
       phase = s.phase;
       events = [];
-      view = Table.viewWithClient(s, caller, clientId);
+      view = withReplayView(id, Table.viewWithClient(s, caller, clientId));
     };
   };
 
@@ -1184,6 +1262,7 @@ persistent actor {
       trump = null;
       decl = null;
       config = Types.defaultConfig;
+      allowReplay = false;
       isPrivate = false;
       authCode = null;
       banker = null;

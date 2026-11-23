@@ -88,6 +88,24 @@ module {
   /// rejected at creation rather than trusted later.
   public let MIN_AUTH_CODE : Nat = 8;
 
+  /// The state a `#Burying` round starts from, kept only when the table
+  /// allows replay. Restoring it rewinds the result and puts the same hands
+  /// back in front of the banker, who may bury a different eight cards.
+  public type ReplayState = {
+    dealNo : Nat;
+    dealer : Types.Seat;
+    level : Types.Level;
+    teamLevel : [Types.Level];
+    teamEpoch : [Nat];
+    bankTeam : ?Nat;
+    lastBanker : [?Types.Seat];
+    banker : Types.Seat;
+    trump : Types.Suit;
+    decl : ?Types.Declaration;
+    hands : [[Card.Card]];
+    kitty : [Card.Card];
+  };
+
   public type State = {
     id : Types.TableId;
     var phase : Types.Phase;
@@ -1648,6 +1666,123 @@ module {
     resetReady(st);
   };
 
+  /// The burying-phase snapshot of a round, for a replay table to keep outside
+  /// `State` (a new field in the persisted `State` record would break upgrades).
+  /// Only meaningful while the table really is in `#Burying`: the hands then
+  /// still hold the original deal plus the kitty.
+  public func replaySnapshot(st : State) : ?ReplayState {
+    if (st.phase != #Burying) { return null };
+    let b = switch (st.banker) { case (?x) { x }; case null { st.dealer } };
+    ?{
+      dealNo = st.dealNo;
+      dealer = st.dealer;
+      level = st.level;
+      teamLevel = [st.teamLevel[0], st.teamLevel[1]];
+      teamEpoch = [st.teamEpoch[0], st.teamEpoch[1]];
+      bankTeam = st.bankTeam;
+      lastBanker = [st.lastBanker[0], st.lastBanker[1]];
+      banker = b;
+      trump = switch (st.trump) { case (?t) { t }; case null { Card.NT } };
+      decl = st.decl;
+      hands = [st.hands[0], st.hands[1], st.hands[2], st.hands[3]];
+      kitty = st.kitty;
+    };
+  };
+
+  /// Restart the just-scored round from its burying phase. The caller has
+  /// already checked that the table allows replay and supplied the snapshot it
+  /// kept (see `replaySnapshot`). Restores the same hands, kitty, trump, banker
+  /// and level, rolls the abandoned result back, and deals no cards again.
+  public func replayRound(
+    st : State,
+    snap : ReplayState,
+    caller : Principal,
+    clientId : ?Types.ClientId,
+    now : Types.Timestamp,
+  ) : Types.ActionResult {
+    switch (seatOfClient(st, caller, clientId)) {
+      case null { return err(st, #NotASeat, "not seated") };
+      case (?_) {};
+    };
+    if (st.phase != #Scoring) { return err(st, #WrongPhase, "not scoring") };
+    st.dealNo := snap.dealNo;
+    st.dealer := snap.dealer;
+    st.level := snap.level;
+    st.teamLevel[0] := snap.teamLevel[0];
+    st.teamLevel[1] := snap.teamLevel[1];
+    st.teamEpoch[0] := snap.teamEpoch[0];
+    st.teamEpoch[1] := snap.teamEpoch[1];
+    st.bankTeam := snap.bankTeam;
+    st.lastBanker[0] := snap.lastBanker[0];
+    st.lastBanker[1] := snap.lastBanker[1];
+    st.banker := ?snap.banker;
+    st.trump := ?snap.trump;
+    st.decl := snap.decl;
+    st.hands[0] := snap.hands[0];
+    st.hands[1] := snap.hands[1];
+    st.hands[2] := snap.hands[2];
+    st.hands[3] := snap.hands[3];
+    st.kitty := snap.kitty;
+    st.bankerPoints := 0;
+    st.attackerPoints := 0;
+    st.phase := #Burying;
+    st.nextSeat := snap.banker;
+    st.deadline := null;
+    st.declareDeadline := null;
+    st.declareTotal := null;
+    st.nextDealAt := null;
+    st.buryDeadline := if (st.cfg.burySeconds > 0) {
+      ?(now + secondsToNanos(st.cfg.burySeconds))
+    } else if (st.seats[snap.banker] == null) {
+      ?(now + EMPTY_SEAT_NANOS)
+    } else {
+      null
+    };
+    st.deadline := st.buryDeadline;
+    st.trick := List.empty();
+    st.lead := null;
+    st.leadCards := [];
+    st.trickNo := 0;
+    st.played := Basic.emptyPlayed();
+    st.voids := Basic.emptyVoids();
+    st.kittyRevealed := false;
+    st.lastTrick := null;
+    st.dealComplete := true;
+    resetReady(st);
+    // Reuse the ordinary deal events: a repeated `DealStarted` with the same
+    // number is understood as a replay by history and clients. No new event
+    // case is introduced, so the persisted event variant stays upgrade-safe.
+    ignore append(st, now, #DealStarted({
+      dealNo = snap.dealNo;
+      dealer = snap.dealer;
+      level = snap.level;
+    }));
+    switch (snap.decl) {
+      case (?d) { ignore append(st, now, #TrumpDeclared({ seat = d.seat; kind = d.kind; suit = d.suit })) };
+      case null {};
+    };
+    ignore append(st, now, #KittyReceived({ dealer = snap.banker; count = 8 }));
+    // Public ticks restore the other seats' hand counts for every viewer; the
+    // private `HandUpdated` below supplies the viewer's own actual cards.
+    var dealt = 0;
+    var s = 0;
+    while (s < 4) {
+      var n = 0;
+      while (n < 25) {
+        dealt += 1;
+        ignore append(st, now, #DealTick({ dealt; toSeat = s }));
+        n += 1;
+      };
+      s += 1;
+    };
+    var i = 0;
+    while (i < 4) {
+      ignore append(st, now, #HandUpdated({ seat = i; added = []; hand = st.hands[i] }));
+      i += 1;
+    };
+    ok(st);
+  };
+
   /// Apply a play for `seat` (already validated for phase/turn/sanitisation).
   /// `auto` marks a server auto-play and emits `AutoPlayed`.
   func applyPlay(
@@ -2019,12 +2154,18 @@ module {
   /// `?trickId` to return only that trick. Only tricks still inside the
   /// retention window are returned.
   public func playHistory(st : State, onlyTrick : ?Nat) : [Types.PlaySequence] {
-    let out = List.empty<Types.PlaySequence>();
+    var out = List.empty<Types.PlaySequence>();
     var dealNo = 0;
     var trickNo = 0;
     for (e in st.log.values()) {
       switch (e.body) {
-        case (#DealStarted(d)) { dealNo := d.dealNo; trickNo := 0 };
+        case (#DealStarted(d)) {
+          // A replay re-emits `DealStarted` with the same deal number: its old
+          // attempt is not part of this round any more.
+          if (dealNo == d.dealNo) { out := List.filter<Types.PlaySequence>(out, func(ps) = ps.dealNo != d.dealNo) };
+          dealNo := d.dealNo;
+          trickNo := 0;
+        };
         case (#TrickWon(t)) {
           if (onlyTrick == null or onlyTrick == ?e.seq) {
             out.add({
@@ -2086,13 +2227,42 @@ module {
     for (e in st.log.values()) {
       switch (e.body) {
         case (#DealStarted(d)) {
+          // A replay emits the same deal number again. Replace the abandoned
+          // outcome and restore the standing its own start recorded.
+          let replay = dealNo == d.dealNo and dealNo != 0;
+          var previous : ?Types.DealOutcome = null;
+          if (replay) {
+            switch (List.last(out)) {
+              case (?last) {
+                if (last.dealNo == d.dealNo) {
+                  previous := ?last;
+                  ignore out.removeLast();
+                };
+              };
+              case null {};
+            };
+          };
           dealNo := d.dealNo;
           trump := Card.NT;
           buriedKitty := [];
-          teamLevel[bankTeam] := d.level;
-          startBankerLevel := teamLevel[bankTeam];
-          startAttackerLevel := teamLevel[1 - bankTeam];
-          startBankTeam := bankTeam;
+          banker := null;
+          switch (previous) {
+            case (?p) {
+              bankTeam := p.bankTeam;
+              teamLevel[p.bankTeam] := p.bankerLevel;
+              teamLevel[1 - p.bankTeam] := p.attackerLevel;
+              startBankerLevel := p.bankerLevel;
+              startAttackerLevel := p.attackerLevel;
+              startBankTeam := p.bankTeam;
+              decided := true;
+            };
+            case null {
+              teamLevel[bankTeam] := d.level;
+              startBankerLevel := teamLevel[bankTeam];
+              startAttackerLevel := teamLevel[1 - bankTeam];
+              startBankTeam := bankTeam;
+            };
+          };
           var i = 0;
           while (i < 4) {
             startSeats[i] := seats[i];
@@ -2236,6 +2406,9 @@ module {
       trump = st.trump;
       decl = st.decl;
       config = st.cfg;
+      // Filled by the actor, which keeps the replay option outside the
+      // persisted table record (see `CreateTableRequest.allowReplay`).
+      allowReplay = false;
       isPrivate = isPrivate(st);
       // Only a seated viewer gets the auth code; a spectator or observer sees
       // null and cannot build an invitation link.

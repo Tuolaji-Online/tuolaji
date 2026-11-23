@@ -477,6 +477,9 @@ module {
     trump : ?Suit;
     decl : ?Declaration;
     config : TableConfig;
+    // Whether this table offers the end-of-deal replay action. Stored outside
+    // `config` (see `CreateTableRequest.allowReplay`).
+    allowReplay : Bool;
     // Whether the table is private. A private table is not ended by leaving, so
     // the client keeps the seat hand-over choice and hands it to a bot rather
     // than freeing it.
@@ -622,6 +625,11 @@ module {
     // invitation link carries it; joinTable must present a matching value.
     // Null for a public table (and a join must then also present null).
     authCode : ?Text;
+    // Offer a "Replay round" action on the end-of-deal summary. Kept outside
+    // `TableConfig` because adding a field to that persisted record would make
+    // every existing table incompatible across an upgrade; the actor stores
+    // this flag in a separate table-id map instead.
+    allowReplay : ?Bool;
   };
 
   public type GetPlayHistoryRequest = {
